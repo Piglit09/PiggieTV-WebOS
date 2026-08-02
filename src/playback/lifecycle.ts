@@ -1,14 +1,16 @@
-export class PlaybackLifecycle {
-  private stopOwner: (() => Promise<void> | void) | null = null;
+import type { PlaybackStopReason } from './engine';
 
-  public registerStopOwner(owner: () => Promise<void> | void) {
+export class PlaybackLifecycle {
+  private stopOwner: ((reason: PlaybackStopReason) => Promise<void> | void) | null = null;
+
+  public registerStopOwner(owner: (reason: PlaybackStopReason) => Promise<void> | void) {
     this.stopOwner = owner;
     return () => {
       if (this.stopOwner === owner) this.stopOwner = null;
     };
   }
 
-  public async stop() {
-    await this.stopOwner?.();
+  public async stop(reason: PlaybackStopReason = 'user') {
+    await this.stopOwner?.(reason);
   }
 }

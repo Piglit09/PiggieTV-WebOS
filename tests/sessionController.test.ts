@@ -138,6 +138,10 @@ describe('SessionController password authentication', () => {
       'NAVIGATION_REQUESTED',
       'COMPLETE'
     ]);
+    expect(harness.diagnostics.at(-1)?.navigationRequestCount).toBe(1);
+    expect(harness.diagnostics.at(-1)?.stageHistory.map(entry => entry.stage)).toEqual(
+      harness.diagnostics.map(entry => entry.stage)
+    );
     expect(harness.controller.getState()).toMatchObject({
       status: 'success',
       stage: 'COMPLETE',
@@ -324,7 +328,8 @@ describe('SessionController password authentication', () => {
     expect(harness.diagnostics.at(-1)).toMatchObject({
       stage: 'FAILED',
       persistenceSucceeded: false,
-      navigationRequested: false
+      navigationRequested: false,
+      navigationRequestCount: 0
     });
   });
 });

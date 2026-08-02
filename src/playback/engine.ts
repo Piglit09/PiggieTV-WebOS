@@ -1,4 +1,5 @@
 import { DiagnosticsService } from '../core/diagnostics';
+import { redactSensitiveText } from '../core/redaction';
 import {
   clampMediaSeek,
   finiteMediaDuration,
@@ -23,8 +24,50 @@ export type PlaybackEngineState =
 // engine surface. It is never stored as an authoritative engine state.
 export type PlaybackEngineEventState = PlaybackEngineState | 'stopped';
 
-export type PlaybackStopReason = 'user' | 'back' | 'ended' | 'superseded' | 'detached' | 'disposed';
+export type PlaybackStopReason = 'user' | 'back' | 'pagehide' | 'ended' | 'superseded' | 'detached' | 'disposed';
 export type PlaybackStreamMode = 'direct-play' | 'direct-stream' | 'transcode';
+export type PlaybackPlayPromiseResult = 'pending' | 'fulfilled' | 'rejected' | 'cancelled';
+export type PlaybackReportKind = 'playing' | 'progress' | 'stopped';
+export type PlaybackReportStatus = 'queued' | 'attempted' | 'succeeded' | 'failed' | 'skipped';
+
+export type PlaybackReportCallbackResult =
+  | { status: 'sent' }
+  | { status: 'skipped'; reason: string };
+
+export interface PlaybackReportCounts {
+  playing: number;
+  progress: number;
+  stopped: number;
+}
+
+export interface PlaybackReportEvidence {
+  queued: PlaybackReportCounts;
+  attempted: PlaybackReportCounts;
+  succeeded: PlaybackReportCounts;
+  failed: PlaybackReportCounts;
+  skipped: PlaybackReportCounts;
+  last: {
+    kind: PlaybackReportKind;
+    status: PlaybackReportStatus;
+    at: number;
+    reason: string | null;
+  } | null;
+}
+
+export interface PlaybackTimeRangeSummary {
+  count: number;
+  ranges: MediaSeekRange[];
+  totalSeconds: number;
+  truncated: boolean;
+}
+
+export interface PlaybackMediaEventRecord {
+  event: string;
+  timestamp: number;
+  readyState: number;
+  networkState: number;
+  currentTime: number;
+}
 
 export interface PlaybackStartRequest {
   itemId: string;
@@ -40,6 +83,13 @@ export interface PlaybackResolvedSource {
   container?: string | null;
   videoCodec?: string | null;
   audioCodec?: string | null;
+  sourceContainer?: string | null;
+  sourceVideoCodec?: string | null;
+  sourceAudioCodec?: string | null;
+  requestedOutputProtocol?: string | null;
+  requestedOutputContainer?: string | null;
+  requestedOutputVideoCodec?: string | null;
+  requestedOutputAudioCodec?: string | null;
 }
 
 export interface PlaybackResolveContext {
@@ -66,12 +116,25 @@ export interface PlaybackStartResult {
 
 export interface PlaybackDiagnosticsSnapshot {
   attemptId: string | null;
+  activeAttemptId: string | null;
   state: PlaybackEngineState;
   itemIdSuffix: string | null;
   mediaSourceIdSuffix: string | null;
   container: string | null;
   videoCodec: string | null;
   audioCodec: string | null;
+  sourceContainer: string | null;
+  sourceVideoCodec: string | null;
+  sourceAudioCodec: string | null;
+  requestedOutputProtocol: string | null;
+  requestedOutputContainer: string | null;
+  requestedOutputVideoCodec: string | null;
+  requestedOutputAudioCodec: string | null;
+  selectedOutputProtocol: string | null;
+  selectedOutputContainer: string | null;
+  selectedOutputVideoCodec: string | null;
+  selectedOutputAudioCodec: string | null;
+  selectedOutputEvidence: string | null;
   decision: PlaybackStreamMode | null;
   finalUrlOrigin: string | null;
   finalUrlPathCategory: string | null;
@@ -82,7 +145,19 @@ export interface PlaybackDiagnosticsSnapshot {
   paused: boolean;
   ended: boolean;
   canSeek: boolean;
+  bufferedRanges: PlaybackTimeRangeSummary;
+  seekableRanges: PlaybackTimeRangeSummary;
+  sourcePresent: boolean;
+  progressReportingActive: boolean;
+  lastStopReason: PlaybackStopReason | null;
   lastMediaEvent: string | null;
+  mediaEventHistory: PlaybackMediaEventRecord[];
+  mediaEventHistoryTruncated: boolean;
+  mediaEventCounts: Record<string, number>;
+  lastMediaErrorCode: number | null;
+  lastMediaErrorMessage: string | null;
+  lastPlayPromiseResult: PlaybackPlayPromiseResult | null;
+  lastPlayPromiseError: string | null;
   lastPlayerError: string | null;
   sourceAssignments: number;
   loadCalls: number;
@@ -90,6 +165,7 @@ export interface PlaybackDiagnosticsSnapshot {
   playingReports: number;
   progressReports: number;
   stoppedReports: number;
+  reportEvidence: PlaybackReportEvidence;
 }
 
 export interface PlaybackEngineListeners {
@@ -103,9 +179,9 @@ export interface PlaybackEngineDependencies {
     request: PlaybackStartRequest,
     context: PlaybackResolveContext
   ) => Promise<PlaybackResolvedSource>;
-  reportPlaying?: (report: PlaybackReport) => Promise<void> | void;
-  reportProgress?: (report: PlaybackReport) => Promise<void> | void;
-  reportStopped?: (report: PlaybackReport) => Promise<void> | void;
+  reportPlaying?: (report: PlaybackReport) => Promise<PlaybackReportCallbackResult | void> | PlaybackReportCallbackResult | void;
+  reportProgress?: (report: PlaybackReport) => Promise<PlaybackReportCallbackResult | void> | PlaybackReportCallbackResult | void;
+  reportStopped?: (report: PlaybackReport) => Promise<PlaybackReportCallbackResult | void> | PlaybackReportCallbackResult | void;
   progressIntervalMs?: number;
   readinessTimeoutMs?: number;
   createAttemptId?: () => string;
@@ -122,10 +198,31 @@ interface MutablePlaybackDiagnostics {
   container: string | null;
   videoCodec: string | null;
   audioCodec: string | null;
+  sourceContainer: string | null;
+  sourceVideoCodec: string | null;
+  sourceAudioCodec: string | null;
+  requestedOutputProtocol: string | null;
+  requestedOutputContainer: string | null;
+  requestedOutputVideoCodec: string | null;
+  requestedOutputAudioCodec: string | null;
+  selectedOutputProtocol: string | null;
+  selectedOutputContainer: string | null;
+  selectedOutputVideoCodec: string | null;
+  selectedOutputAudioCodec: string | null;
+  selectedOutputEvidence: string | null;
   decision: PlaybackStreamMode | null;
   finalUrlOrigin: string | null;
   finalUrlPathCategory: string | null;
+  lastStopReason: PlaybackStopReason | null;
   lastMediaEvent: string | null;
+  mediaEventHistory: PlaybackMediaEventRecord[];
+  mediaEventCount: number;
+  mediaEventCounts: Record<string, number>;
+  lastRecordedTimeUpdateAt: number | null;
+  lastMediaErrorCode: number | null;
+  lastMediaErrorMessage: string | null;
+  lastPlayPromiseResult: PlaybackPlayPromiseResult | null;
+  lastPlayPromiseError: string | null;
   lastPlayerError: string | null;
   sourceAssignments: number;
   loadCalls: number;
@@ -133,6 +230,7 @@ interface MutablePlaybackDiagnostics {
   playingReports: number;
   progressReports: number;
   stoppedReports: number;
+  reportEvidence: PlaybackReportEvidence;
 }
 
 interface ActivePlaybackAttempt {
@@ -158,11 +256,44 @@ interface ReadinessWaiter {
 const HAVE_FUTURE_DATA = 3;
 const DEFAULT_PROGRESS_INTERVAL_MS = 5_000;
 const DEFAULT_READINESS_TIMEOUT_MS = 15_000;
+const MAX_DIAGNOSTIC_RANGES = 8;
+const MAX_TIME_RANGES_TO_SCAN = 64;
+const MAX_MEDIA_EVENT_HISTORY = 80;
+const TIMEUPDATE_DIAGNOSTIC_INTERVAL_MS = 1_000;
+const PASSIVE_MEDIA_EVENTS = [
+  'abort',
+  'canplaythrough',
+  'emptied',
+  'encrypted',
+  'loadstart',
+  'play',
+  'progress',
+  'ratechange',
+  'resize',
+  'suspend',
+  'volumechange',
+  'waitingforkey'
+] as const;
 let attemptSequence = 0;
 
 function createDefaultAttemptId() {
   attemptSequence += 1;
   return `playback-${Date.now().toString(36)}-${attemptSequence.toString(36)}`;
+}
+
+function emptyReportCounts(): PlaybackReportCounts {
+  return { playing: 0, progress: 0, stopped: 0 };
+}
+
+function emptyReportEvidence(): PlaybackReportEvidence {
+  return {
+    queued: emptyReportCounts(),
+    attempted: emptyReportCounts(),
+    succeeded: emptyReportCounts(),
+    failed: emptyReportCounts(),
+    skipped: emptyReportCounts(),
+    last: null
+  };
 }
 
 function emptyDiagnostics(): MutablePlaybackDiagnostics {
@@ -173,17 +304,39 @@ function emptyDiagnostics(): MutablePlaybackDiagnostics {
     container: null,
     videoCodec: null,
     audioCodec: null,
+    sourceContainer: null,
+    sourceVideoCodec: null,
+    sourceAudioCodec: null,
+    requestedOutputProtocol: null,
+    requestedOutputContainer: null,
+    requestedOutputVideoCodec: null,
+    requestedOutputAudioCodec: null,
+    selectedOutputProtocol: null,
+    selectedOutputContainer: null,
+    selectedOutputVideoCodec: null,
+    selectedOutputAudioCodec: null,
+    selectedOutputEvidence: null,
     decision: null,
     finalUrlOrigin: null,
     finalUrlPathCategory: null,
+    lastStopReason: null,
     lastMediaEvent: null,
+    mediaEventHistory: [],
+    mediaEventCount: 0,
+    mediaEventCounts: {},
+    lastRecordedTimeUpdateAt: null,
+    lastMediaErrorCode: null,
+    lastMediaErrorMessage: null,
+    lastPlayPromiseResult: null,
+    lastPlayPromiseError: null,
     lastPlayerError: null,
     sourceAssignments: 0,
     loadCalls: 0,
     playCalls: 0,
     playingReports: 0,
     progressReports: 0,
-    stoppedReports: 0
+    stoppedReports: 0,
+    reportEvidence: emptyReportEvidence()
   };
 }
 
@@ -195,7 +348,28 @@ function idSuffix(value?: string | null) {
 function errorMessage(error: unknown) {
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === 'string' && error.trim()) return error.trim();
+  if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' && error.message.trim()) {
+    return error.message.trim();
+  }
   return 'Playback failed';
+}
+
+function safeErrorMessage(error: unknown) {
+  return redactSensitiveText(errorMessage(error));
+}
+
+function summarizeRanges(ranges: MediaSeekRange[], sourceLength: number): PlaybackTimeRangeSummary {
+  const visibleRanges = ranges.slice(0, MAX_DIAGNOSTIC_RANGES).map(range => ({ ...range }));
+  const totalSeconds = ranges.reduce((total, range) => {
+    const next = total + Math.max(0, range.end - range.start);
+    return Number.isFinite(next) ? next : Number.MAX_SAFE_INTEGER;
+  }, 0);
+  return {
+    count: ranges.length,
+    ranges: visibleRanges,
+    totalSeconds,
+    truncated: ranges.length > visibleRanges.length || sourceLength > MAX_TIME_RANGES_TO_SCAN
+  };
 }
 
 function isAbortError(error: unknown) {
@@ -231,6 +405,58 @@ function streamDescriptor(url: string, mode?: PlaybackStreamMode | null) {
   }
 }
 
+function selectedOutputDescriptor(
+  url: string,
+  mode: PlaybackStreamMode | null | undefined,
+  source: Pick<PlaybackResolvedSource, 'sourceContainer' | 'sourceVideoCodec' | 'sourceAudioCodec' | 'container' | 'videoCodec' | 'audioCodec'>
+) {
+  const sourceContainer = source.sourceContainer ?? source.container ?? null;
+  const sourceVideoCodec = source.sourceVideoCodec ?? source.videoCodec ?? null;
+  const sourceAudioCodec = source.sourceAudioCodec ?? source.audioCodec ?? null;
+
+  try {
+    const base = typeof window === 'undefined' ? undefined : window.location.href;
+    const parsed = base ? new URL(url, base) : new URL(url);
+    const query = new Map<string, string>();
+    parsed.searchParams.forEach((value, key) => query.set(key.toLowerCase(), value));
+    const queryValue = (...keys: string[]) => {
+      for (const key of keys) {
+        const value = query.get(key.toLowerCase());
+        if (value?.trim()) return value.trim().toLowerCase();
+      }
+      return null;
+    };
+    const extensionMatch = parsed.pathname.toLowerCase().match(/\.([a-z0-9]+)$/);
+    const extension = extensionMatch?.[1] ?? null;
+    const urlProtocol = parsed.protocol ? parsed.protocol.replace(/:$/, '').toLowerCase() : null;
+    const mediaProtocol = urlProtocol === 'http' || urlProtocol === 'https' ? 'http' : urlProtocol;
+    const selectedProtocol = queryValue('TranscodingProtocol', 'Protocol')
+      ?? (extension === 'm3u8' ? 'hls' : mediaProtocol);
+    const selectedContainer = queryValue('SegmentContainer', 'TranscodingContainer', 'Container')
+      ?? (extension && extension !== 'm3u8' ? extension : null)
+      ?? (mode === 'direct-play' ? sourceContainer : null);
+    const selectedVideoCodec = queryValue('VideoCodec')
+      ?? (mode === 'direct-play' || mode === 'direct-stream' ? sourceVideoCodec : null);
+    const selectedAudioCodec = queryValue('AudioCodec')
+      ?? (mode === 'direct-play' || mode === 'direct-stream' ? sourceAudioCodec : null);
+    return {
+      protocol: selectedProtocol,
+      container: selectedContainer,
+      videoCodec: selectedVideoCodec,
+      audioCodec: selectedAudioCodec,
+      evidence: mode === 'direct-play' ? 'direct-source-and-stream-url' : 'server-selected-stream-url'
+    };
+  } catch {
+    return {
+      protocol: null,
+      container: mode === 'direct-play' ? sourceContainer : null,
+      videoCodec: mode === 'direct-play' ? sourceVideoCodec : null,
+      audioCodec: mode === 'direct-play' ? sourceAudioCodec : null,
+      evidence: mode === 'direct-play' ? 'direct-source' : null
+    };
+  }
+}
+
 export class PlaybackEngine {
   private media?: HTMLVideoElement;
   private state: PlaybackEngineState = 'idle';
@@ -263,16 +489,23 @@ export class PlaybackEngine {
 
   public detach() {
     const media = this.media;
-    const report = this.stop('detached');
+    const shouldStop = this.hasActiveLifecycle();
+    const report = shouldStop ? this.stop('detached') : this.reportChain;
     if (media) this.detachMediaListeners(media);
     this.media = undefined;
+    this.emitDiagnostics();
     void report;
   }
 
   public dispose() {
     if (this.disposed) return;
-    this.detach();
+    const media = this.media;
+    const report = this.hasActiveLifecycle() ? this.stop('disposed') : this.reportChain;
+    if (media) this.detachMediaListeners(media);
+    this.media = undefined;
     this.disposed = true;
+    this.emitDiagnostics();
+    void report;
   }
 
   public async start(request: PlaybackStartRequest): Promise<PlaybackStartResult> {
@@ -347,6 +580,7 @@ export class PlaybackEngine {
   public async play() {
     if (!this.media || this.disposed) return;
     const attempt = this.activeAttempt;
+    if (!attempt || !this.isActive(attempt) || this.state === 'ended' || this.state === 'error') return;
     try {
       const started = await this.invokePlay(attempt);
       if (!started) return;
@@ -365,17 +599,26 @@ export class PlaybackEngine {
 
   public pause() {
     if (!this.media || this.disposed) return;
+    const attempt = this.activeAttempt;
+    if (!attempt || !this.isActive(attempt) || this.state === 'ended' || this.state === 'error') return;
     try {
       this.media.pause();
       if (this.state !== 'stopping' && this.state !== 'idle') this.transition('paused');
-      if (this.activeAttempt?.hasStarted) this.queueProgressReport(this.activeAttempt);
+      if (attempt.hasStarted) this.queueProgressReport(attempt);
     } catch (error) {
-      this.handleFatalError(error, this.activeAttempt);
+      this.handleFatalError(error, attempt);
     }
   }
 
   public stop(reason: PlaybackStopReason = 'user'): Promise<void> {
     const attempt = this.activeAttempt;
+    const hadActiveLifecycle = this.hasActiveLifecycle();
+    if (hadActiveLifecycle) {
+      this.metrics.lastStopReason = reason;
+      if (this.metrics.lastPlayPromiseResult === 'pending') {
+        this.metrics.lastPlayPromiseResult = 'cancelled';
+      }
+    }
     if (attempt) {
       this.activeAttempt = null;
       attempt.controller.abort(reason);
@@ -400,13 +643,12 @@ export class PlaybackEngine {
   public seek(seconds: number) {
     if (!this.media || this.disposed) return false;
     const duration = finiteMediaDuration(this.media.duration);
-    const target = clampMediaSeek(seconds, duration, this.readSeekableRanges());
+    const target = clampMediaSeek(seconds, duration, this.readMediaRanges('seekable'));
     if (target == null) return false;
 
     try {
       this.media.currentTime = target;
-      this.metrics.lastMediaEvent = 'seek-requested';
-      this.emitDiagnostics();
+      this.recordMediaEvent('seek-requested');
       return true;
     } catch (error) {
       this.handleFatalError(error, this.activeAttempt);
@@ -416,7 +658,7 @@ export class PlaybackEngine {
 
   public canSeek() {
     if (!this.media) return false;
-    return finiteMediaDuration(this.media.duration) != null && this.readSeekableRanges().length > 0;
+    return finiteMediaDuration(this.media.duration) != null && this.readMediaRanges('seekable').length > 0;
   }
 
   public getState() {
@@ -429,32 +671,70 @@ export class PlaybackEngine {
 
   public getDiagnosticsSnapshot(): PlaybackDiagnosticsSnapshot {
     const media = this.media;
+    const bufferedSourceLength = this.readMediaRangeLength('buffered');
+    const seekableSourceLength = this.readMediaRangeLength('seekable');
+    const bufferedRanges = this.readMediaRanges('buffered');
+    const seekableRanges = this.readMediaRanges('seekable');
+    const duration = finiteMediaDuration(media?.duration);
     return {
       attemptId: this.metrics.attemptId,
+      activeAttemptId: this.activeAttempt?.id ?? null,
       state: this.state,
       itemIdSuffix: this.metrics.itemIdSuffix,
       mediaSourceIdSuffix: this.metrics.mediaSourceIdSuffix,
       container: this.metrics.container,
       videoCodec: this.metrics.videoCodec,
       audioCodec: this.metrics.audioCodec,
+      sourceContainer: this.metrics.sourceContainer,
+      sourceVideoCodec: this.metrics.sourceVideoCodec,
+      sourceAudioCodec: this.metrics.sourceAudioCodec,
+      requestedOutputProtocol: this.metrics.requestedOutputProtocol,
+      requestedOutputContainer: this.metrics.requestedOutputContainer,
+      requestedOutputVideoCodec: this.metrics.requestedOutputVideoCodec,
+      requestedOutputAudioCodec: this.metrics.requestedOutputAudioCodec,
+      selectedOutputProtocol: this.metrics.selectedOutputProtocol,
+      selectedOutputContainer: this.metrics.selectedOutputContainer,
+      selectedOutputVideoCodec: this.metrics.selectedOutputVideoCodec,
+      selectedOutputAudioCodec: this.metrics.selectedOutputAudioCodec,
+      selectedOutputEvidence: this.metrics.selectedOutputEvidence,
       decision: this.metrics.decision,
       finalUrlOrigin: this.metrics.finalUrlOrigin,
       finalUrlPathCategory: this.metrics.finalUrlPathCategory,
       readyState: media?.readyState ?? 0,
       networkState: media?.networkState ?? 0,
       currentTime: safeMediaPosition(media?.currentTime),
-      duration: finiteMediaDuration(media?.duration),
+      duration,
       paused: media?.paused ?? true,
       ended: media?.ended ?? false,
-      canSeek: this.canSeek(),
+      canSeek: duration != null && seekableRanges.length > 0,
+      bufferedRanges: summarizeRanges(bufferedRanges, bufferedSourceLength),
+      seekableRanges: summarizeRanges(seekableRanges, seekableSourceLength),
+      sourcePresent: this.sourceIsPresent(),
+      progressReportingActive: this.progressTimer !== null,
+      lastStopReason: this.metrics.lastStopReason,
       lastMediaEvent: this.metrics.lastMediaEvent,
+      mediaEventHistory: this.metrics.mediaEventHistory.map(entry => ({ ...entry })),
+      mediaEventHistoryTruncated: this.metrics.mediaEventCount > this.metrics.mediaEventHistory.length,
+      mediaEventCounts: { ...this.metrics.mediaEventCounts },
+      lastMediaErrorCode: this.metrics.lastMediaErrorCode,
+      lastMediaErrorMessage: this.metrics.lastMediaErrorMessage,
+      lastPlayPromiseResult: this.metrics.lastPlayPromiseResult,
+      lastPlayPromiseError: this.metrics.lastPlayPromiseError,
       lastPlayerError: this.metrics.lastPlayerError,
       sourceAssignments: this.metrics.sourceAssignments,
       loadCalls: this.metrics.loadCalls,
       playCalls: this.metrics.playCalls,
       playingReports: this.metrics.playingReports,
       progressReports: this.metrics.progressReports,
-      stoppedReports: this.metrics.stoppedReports
+      stoppedReports: this.metrics.stoppedReports,
+      reportEvidence: {
+        queued: { ...this.metrics.reportEvidence.queued },
+        attempted: { ...this.metrics.reportEvidence.attempted },
+        succeeded: { ...this.metrics.reportEvidence.succeeded },
+        failed: { ...this.metrics.reportEvidence.failed },
+        skipped: { ...this.metrics.reportEvidence.skipped },
+        last: this.metrics.reportEvidence.last ? { ...this.metrics.reportEvidence.last } : null
+      }
     };
   }
 
@@ -475,15 +755,32 @@ export class PlaybackEngine {
     const media = this.media;
     if (!media) return false;
     if (attempt && !this.isActive(attempt)) return false;
-    this.metrics.playCalls += 1;
-    this.emitDiagnostics();
+    const metrics = attempt?.metrics ?? this.metrics;
+    metrics.playCalls += 1;
+    metrics.lastPlayPromiseResult = 'pending';
+    metrics.lastPlayPromiseError = null;
+    if (this.metrics === metrics) this.emitDiagnostics();
 
     try {
       await Promise.resolve(media.play());
-      if (attempt && !this.isActive(attempt)) return false;
+      if (attempt && !this.isActive(attempt)) {
+        metrics.lastPlayPromiseResult = 'cancelled';
+        if (this.metrics === metrics) this.emitDiagnostics();
+        return false;
+      }
+      metrics.lastPlayPromiseResult = 'fulfilled';
+      if (this.metrics === metrics) this.emitDiagnostics();
       return true;
     } catch (error) {
-      if (attempt && this.isExpectedCancellation(error, attempt)) return false;
+      if (attempt && this.isExpectedCancellation(error, attempt)) {
+        metrics.lastPlayPromiseResult = 'cancelled';
+        metrics.lastPlayPromiseError = null;
+        if (this.metrics === metrics) this.emitDiagnostics();
+        return false;
+      }
+      metrics.lastPlayPromiseResult = 'rejected';
+      metrics.lastPlayPromiseError = safeErrorMessage(error);
+      if (this.metrics === metrics) this.emitDiagnostics();
       throw error;
     }
   }
@@ -492,6 +789,10 @@ export class PlaybackEngine {
     const previous = this.activeAttempt;
     if (!previous && !this.hasAssignedSource) return;
 
+    this.metrics.lastStopReason = 'superseded';
+    if (this.metrics.lastPlayPromiseResult === 'pending') {
+      this.metrics.lastPlayPromiseResult = 'cancelled';
+    }
     this.transition('stopping', { reason: 'superseded' });
     if (previous) {
       this.activeAttempt = null;
@@ -513,7 +814,7 @@ export class PlaybackEngine {
       // Reset continues even if the platform rejects pause during teardown.
     }
 
-    const hasSource = this.hasAssignedSource || media.hasAttribute('src') || Boolean(media.currentSrc);
+    const hasSource = this.sourceIsPresent();
     if (!hasSource) return;
     media.removeAttribute('src');
     this.hasAssignedSource = false;
@@ -570,12 +871,13 @@ export class PlaybackEngine {
   }
 
   private startProgressTimer(attempt: ActivePlaybackAttempt) {
-    if (!this.dependencies.reportProgress || !this.isActive(attempt)) return;
+    if (!this.dependencies.reportProgress || !attempt.resolvedSource?.playSessionId || !this.isActive(attempt)) return;
     this.clearProgressTimer();
     const intervalMs = this.dependencies.progressIntervalMs ?? DEFAULT_PROGRESS_INTERVAL_MS;
     this.progressTimer = this.scheduleInterval(() => {
       if (this.isActive(attempt) && attempt.hasStarted) this.queueProgressReport(attempt);
     }, intervalMs);
+    this.emitDiagnostics();
   }
 
   private clearProgressTimer() {
@@ -583,6 +885,7 @@ export class PlaybackEngine {
     const clear = this.dependencies.clearInterval ?? (handle => window.clearInterval(handle));
     clear(this.progressTimer);
     this.progressTimer = null;
+    this.emitDiagnostics();
   }
 
   private queueProgressReport(attempt: ActivePlaybackAttempt) {
@@ -616,7 +919,7 @@ export class PlaybackEngine {
   }
 
   private enqueueReport(
-    kind: 'playing' | 'progress' | 'stopped',
+    kind: PlaybackReportKind,
     attempt: ActivePlaybackAttempt,
     report: PlaybackReport
   ) {
@@ -627,19 +930,43 @@ export class PlaybackEngine {
         : this.dependencies.reportStopped;
     if (!callback) return this.reportChain;
 
+    const evidence = attempt.metrics.reportEvidence;
+    evidence.queued[kind] += 1;
+    evidence.last = { kind, status: 'queued', at: Date.now(), reason: null };
+    if (this.metrics === attempt.metrics) this.emitDiagnostics();
+
     const run = async () => {
+      evidence.attempted[kind] += 1;
+      evidence.last = { kind, status: 'attempted', at: Date.now(), reason: null };
+      if (this.metrics === attempt.metrics) this.emitDiagnostics();
       try {
-        await callback(report);
-        if (kind === 'playing') attempt.metrics.playingReports += 1;
-        if (kind === 'progress') attempt.metrics.progressReports += 1;
-        if (kind === 'stopped') attempt.metrics.stoppedReports += 1;
-        if (this.metrics === attempt.metrics) this.emitDiagnostics();
+        const result = await callback(report);
+        if (result?.status === 'skipped') {
+          evidence.skipped[kind] += 1;
+          evidence.last = {
+            kind,
+            status: 'skipped',
+            at: Date.now(),
+            reason: redactSensitiveText(result.reason)
+          };
+        } else {
+          evidence.succeeded[kind] += 1;
+          evidence.last = { kind, status: 'succeeded', at: Date.now(), reason: null };
+          if (kind === 'playing') attempt.metrics.playingReports += 1;
+          if (kind === 'progress') attempt.metrics.progressReports += 1;
+          if (kind === 'stopped') attempt.metrics.stoppedReports += 1;
+        }
       } catch (error) {
+        const safeError = safeErrorMessage(error);
+        evidence.failed[kind] += 1;
+        evidence.last = { kind, status: 'failed', at: Date.now(), reason: safeError };
         this.diagnostics?.logWarn(`Playback ${kind} report failed`, {
           attemptId: attempt.id,
           itemIdSuffix: attempt.metrics.itemIdSuffix,
-          error: errorMessage(error)
+          error: safeError
         });
+      } finally {
+        if (this.metrics === attempt.metrics) this.emitDiagnostics();
       }
     };
     this.reportChain = this.reportChain.then(run, run);
@@ -664,10 +991,26 @@ export class PlaybackEngine {
 
   private updateResolvedDiagnostics(attempt: ActivePlaybackAttempt, source: PlaybackResolvedSource) {
     const descriptor = streamDescriptor(source.url, source.mode);
+    const selectedOutput = selectedOutputDescriptor(source.url, source.mode, source);
+    const sourceContainer = source.sourceContainer ?? source.container ?? null;
+    const sourceVideoCodec = source.sourceVideoCodec ?? source.videoCodec ?? null;
+    const sourceAudioCodec = source.sourceAudioCodec ?? source.audioCodec ?? null;
     attempt.metrics.mediaSourceIdSuffix = idSuffix(source.mediaSourceId);
-    attempt.metrics.container = source.container ?? null;
-    attempt.metrics.videoCodec = source.videoCodec ?? null;
-    attempt.metrics.audioCodec = source.audioCodec ?? null;
+    attempt.metrics.container = sourceContainer;
+    attempt.metrics.videoCodec = sourceVideoCodec;
+    attempt.metrics.audioCodec = sourceAudioCodec;
+    attempt.metrics.sourceContainer = sourceContainer;
+    attempt.metrics.sourceVideoCodec = sourceVideoCodec;
+    attempt.metrics.sourceAudioCodec = sourceAudioCodec;
+    attempt.metrics.requestedOutputProtocol = source.requestedOutputProtocol ?? null;
+    attempt.metrics.requestedOutputContainer = source.requestedOutputContainer ?? null;
+    attempt.metrics.requestedOutputVideoCodec = source.requestedOutputVideoCodec ?? null;
+    attempt.metrics.requestedOutputAudioCodec = source.requestedOutputAudioCodec ?? null;
+    attempt.metrics.selectedOutputProtocol = selectedOutput.protocol;
+    attempt.metrics.selectedOutputContainer = selectedOutput.container;
+    attempt.metrics.selectedOutputVideoCodec = selectedOutput.videoCodec;
+    attempt.metrics.selectedOutputAudioCodec = selectedOutput.audioCodec;
+    attempt.metrics.selectedOutputEvidence = selectedOutput.evidence;
     attempt.metrics.decision = source.mode ?? null;
     attempt.metrics.finalUrlOrigin = descriptor.origin;
     attempt.metrics.finalUrlPathCategory = descriptor.category;
@@ -684,9 +1027,10 @@ export class PlaybackEngine {
 
   private handleFatalError(error: unknown, attempt: ActivePlaybackAttempt | null) {
     if (attempt && !this.isActive(attempt)) return;
-    const message = errorMessage(error);
+    const message = safeErrorMessage(error);
     if (this.state === 'error' && this.metrics.lastPlayerError === message) return;
     this.metrics.lastPlayerError = message;
+    this.clearProgressTimer();
     this.transition('error');
     this.diagnostics?.recordPlaybackError(message);
     this.listeners.onError?.(message);
@@ -710,6 +1054,30 @@ export class PlaybackEngine {
 
   private recordMediaEvent(event: string) {
     this.metrics.lastMediaEvent = event;
+    this.metrics.mediaEventCount += 1;
+    this.metrics.mediaEventCounts[event] = (this.metrics.mediaEventCounts[event] ?? 0) + 1;
+    const timestamp = Date.now();
+    if (
+      event === 'timeupdate' &&
+      this.metrics.lastRecordedTimeUpdateAt !== null &&
+      timestamp - this.metrics.lastRecordedTimeUpdateAt < TIMEUPDATE_DIAGNOSTIC_INTERVAL_MS
+    ) {
+      return;
+    }
+    if (event === 'timeupdate') this.metrics.lastRecordedTimeUpdateAt = timestamp;
+
+    if (this.metrics.mediaEventHistory.length >= MAX_MEDIA_EVENT_HISTORY) {
+      const oldestTimeUpdate = this.metrics.mediaEventHistory.findIndex(entry => entry.event === 'timeupdate');
+      if (oldestTimeUpdate >= 0) this.metrics.mediaEventHistory.splice(oldestTimeUpdate, 1);
+      else this.metrics.mediaEventHistory.shift();
+    }
+    this.metrics.mediaEventHistory.push({
+      event,
+      timestamp,
+      readyState: this.media?.readyState ?? 0,
+      networkState: this.media?.networkState ?? 0,
+      currentTime: safeMediaPosition(this.media?.currentTime)
+    });
     this.emitDiagnostics();
   }
 
@@ -728,6 +1096,7 @@ export class PlaybackEngine {
     this.media.addEventListener('timeupdate', this.handleTimeUpdate);
     this.media.addEventListener('ended', this.handleEnded);
     this.media.addEventListener('error', this.handleError);
+    PASSIVE_MEDIA_EVENTS.forEach(event => this.media?.addEventListener(event, this.handlePassiveMediaEvent));
     this.listenersBound = true;
   }
 
@@ -746,8 +1115,13 @@ export class PlaybackEngine {
     media.removeEventListener('timeupdate', this.handleTimeUpdate);
     media.removeEventListener('ended', this.handleEnded);
     media.removeEventListener('error', this.handleError);
+    PASSIVE_MEDIA_EVENTS.forEach(event => media.removeEventListener(event, this.handlePassiveMediaEvent));
     this.listenersBound = false;
   }
+
+  private readonly handlePassiveMediaEvent = (event: Event) => {
+    this.recordMediaEvent(event.type);
+  };
 
   private readonly handleLoadedMetadata = () => {
     this.recordMediaEvent('loadedmetadata');
@@ -769,17 +1143,16 @@ export class PlaybackEngine {
 
   private readonly handlePlaying = () => {
     this.recordMediaEvent('playing');
-    if (this.state !== 'stopping' && (this.activeAttempt || this.hasAssignedSource)) {
-      this.transition('playing');
-    }
+    const attempt = this.activeAttempt;
+    if (!attempt || !this.isActive(attempt) || this.state === 'stopping' || this.state === 'idle' || this.state === 'ended' || this.state === 'error') return;
+    this.transition('playing');
   };
 
   private readonly handlePause = () => {
     this.recordMediaEvent('pause');
-    const hasStartedSource = this.activeAttempt?.hasStarted || (!this.activeAttempt && this.hasAssignedSource);
-    if (this.state !== 'stopping' && this.state !== 'idle' && hasStartedSource) {
-      this.transition('paused');
-    }
+    const attempt = this.activeAttempt;
+    if (!attempt?.hasStarted || !this.isActive(attempt) || this.state === 'stopping' || this.state === 'idle' || this.state === 'ended' || this.state === 'error') return;
+    this.transition('paused');
   };
 
   private readonly handleWaiting = () => {
@@ -807,31 +1180,50 @@ export class PlaybackEngine {
   private readonly handleEnded = () => {
     this.recordMediaEvent('ended');
     const attempt = this.activeAttempt;
+    if (!attempt || !this.isActive(attempt) || this.state === 'stopping' || this.state === 'idle' || this.state === 'ended' || this.state === 'error') return;
+    this.metrics.lastStopReason = 'ended';
+    this.activeAttempt = null;
+    attempt.controller.abort('ended');
+    attempt.progressReportQueued = false;
     this.clearProgressTimer();
     this.transition('ended');
-    if (!attempt) return;
     if (attempt.hasStarted) this.queueStoppedReport(attempt, 'ended');
   };
 
   private readonly handleError = () => {
-    this.recordMediaEvent('error');
     const attempt = this.activeAttempt;
-    if (attempt?.controller.signal.aborted || this.state === 'stopping') return;
-    if (!attempt && !this.hasAssignedSource) return;
-    const message = `Playback error: ${this.media?.error?.message ?? 'unknown media error'}`;
+    if (!attempt || !this.isActive(attempt) || this.state === 'stopping' || this.state === 'idle' || this.state === 'ended' || this.state === 'error') {
+      this.recordMediaEvent('error');
+      return;
+    }
+    const mediaError = this.media?.error;
+    const errorCode = Number(mediaError?.code);
+    const mediaMessage = safeErrorMessage(mediaError?.message || 'unknown media error');
+    this.metrics.lastMediaErrorCode = Number.isFinite(errorCode) && errorCode > 0 ? errorCode : null;
+    this.metrics.lastMediaErrorMessage = mediaMessage;
+    this.recordMediaEvent('error');
+    const message = `Playback error: ${mediaMessage}`;
     const error = new Error(message);
     this.clearReadinessWaiter(attempt?.id, error);
     this.handleFatalError(error, attempt);
   };
 
-  private readSeekableRanges(): MediaSeekRange[] {
-    const seekable = this.media?.seekable;
-    if (!seekable || seekable.length <= 0) return [];
+  private readMediaRanges(kind: 'buffered' | 'seekable'): MediaSeekRange[] {
+    let source: TimeRanges | null = null;
+    try {
+      source = this.media?.[kind] ?? null;
+    } catch {
+      return [];
+    }
+    if (!source) return [];
+    const sourceLength = Number(source.length);
+    if (!Number.isFinite(sourceLength) || sourceLength <= 0) return [];
+    const scanLength = Math.min(Math.floor(sourceLength), MAX_TIME_RANGES_TO_SCAN);
     const ranges: MediaSeekRange[] = [];
-    for (let index = 0; index < seekable.length; index += 1) {
+    for (let index = 0; index < scanLength; index += 1) {
       try {
-        const start = seekable.start(index);
-        const end = seekable.end(index);
+        const start = source.start(index);
+        const end = source.end(index);
         if (Number.isFinite(start) && Number.isFinite(end) && start >= 0 && end >= start) {
           ranges.push({ start, end });
         }
@@ -840,6 +1232,36 @@ export class PlaybackEngine {
       }
     }
     return ranges;
+  }
+
+  private readMediaRangeLength(kind: 'buffered' | 'seekable') {
+    try {
+      const length = Number(this.media?.[kind]?.length ?? 0);
+      return Number.isFinite(length) && length > 0 ? Math.floor(length) : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  private sourceIsPresent() {
+    if (this.hasAssignedSource) return true;
+    const media = this.media;
+    if (!media) return false;
+    try {
+      return media.hasAttribute('src') || Boolean(media.currentSrc);
+    } catch {
+      return false;
+    }
+  }
+
+  private hasActiveLifecycle() {
+    return Boolean(
+      this.activeAttempt ||
+      this.hasAssignedSource ||
+      this.progressTimer !== null ||
+      this.readinessWaiter ||
+      this.state !== 'idle'
+    );
   }
 
   private scheduleInterval(callback: () => void, milliseconds: number) {

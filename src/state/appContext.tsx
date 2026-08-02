@@ -27,6 +27,7 @@ export interface AppState {
   startupInProgress: boolean;
   startupMessage: string;
   startupError: string | null;
+  bootstrapRetryNonce: number;
   serverUrl: string | null;
   serverSession: PtvServerSession | null;
   userSession: PtvUserSession | null;
@@ -43,6 +44,7 @@ export interface AppState {
 export type AppAction =
   | { type: 'set_bootstrap_complete' }
   | { type: 'set_startup'; startupInProgress: boolean; startupMessage: string; startupError?: string | null }
+  | { type: 'retry_bootstrap' }
   | { type: 'set_route'; route: PtvRoute; replace?: boolean }
   | { type: 'reset_route'; route: PtvRoute }
   | { type: 'go_back' }
@@ -93,6 +95,7 @@ function initialState(): AppState {
     startupInProgress: true,
     startupMessage: 'Starting PiggieTV',
     startupError: null,
+    bootstrapRetryNonce: 0,
     serverUrl: null,
     serverSession: null,
     userSession: null,
@@ -118,6 +121,15 @@ function appReducer(state: AppState, action: AppAction): AppState {
         startupInProgress: action.startupInProgress,
         startupMessage: action.startupMessage,
         startupError: action.startupError ?? null
+      };
+
+    case 'retry_bootstrap':
+      return {
+        ...state,
+        startupInProgress: true,
+        startupMessage: 'Retrying saved session',
+        startupError: null,
+        bootstrapRetryNonce: state.bootstrapRetryNonce + 1
       };
 
     case 'set_route': {

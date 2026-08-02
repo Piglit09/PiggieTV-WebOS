@@ -175,6 +175,13 @@ export interface SessionDiagnosticSnapshot {
   apiContextUpdated: boolean;
   authStateCommitted: boolean;
   navigationRequested: boolean;
+  navigationRequestCount: number;
+  activeAttemptCount: number;
+  stageHistory: Array<{
+    stage: SessionControllerStage;
+    at: number;
+    resultClassification: SessionResultClassification;
+  }>;
   stale: boolean;
   cancelled: boolean;
   errorMessage?: string;
@@ -262,6 +269,12 @@ interface InternalAttempt {
   apiContextUpdated: boolean;
   authStateCommitted: boolean;
   navigationRequested: boolean;
+  navigationRequestCount: number;
+  stageHistory: Array<{
+    stage: SessionControllerStage;
+    at: number;
+    resultClassification: SessionResultClassification;
+  }>;
   sensitiveValues: Set<string>;
 }
 
@@ -727,7 +740,8 @@ export class SessionController {
     attempt.authStateCommitted = true;
     this.emit(attempt, 'AUTH_STATE_COMMITTED', 'pending');
 
-    attempt.navigationRequested = true;
+    attempt.navigationRequestCount += 1;
+    attempt.navigationRequested = attempt.navigationRequestCount > 0;
     this.emit(attempt, 'NAVIGATION_REQUESTED', 'pending');
     try {
       await raceWithAbort(
@@ -774,6 +788,8 @@ export class SessionController {
       apiContextUpdated: false,
       authStateCommitted: false,
       navigationRequested: false,
+      navigationRequestCount: 0,
+      stageHistory: [],
       sensitiveValues: new Set(sensitiveValues.filter(Boolean))
     };
     this.activeAttempt = attempt;
@@ -860,6 +876,8 @@ export class SessionController {
           ? 'idle'
           : 'pending';
     const now = this.now();
+    attempt.stageHistory.push({ stage, at: now, resultClassification: classification });
+    if (attempt.stageHistory.length > 64) attempt.stageHistory.shift();
     const snapshot: SessionDiagnosticSnapshot = {
       attemptId: attempt.id,
       workflow: attempt.workflow,
@@ -877,6 +895,9 @@ export class SessionController {
       apiContextUpdated: attempt.apiContextUpdated,
       authStateCommitted: attempt.authStateCommitted,
       navigationRequested: attempt.navigationRequested,
+      navigationRequestCount: attempt.navigationRequestCount,
+      activeAttemptCount: terminal ? 0 : 1,
+      stageHistory: attempt.stageHistory.map(entry => ({ ...entry })),
       stale: attempt.cancelReason === 'superseded',
       cancelled: stage === 'CANCELLED',
       errorMessage: options.errorMessage

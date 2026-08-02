@@ -45,14 +45,14 @@ npm run webos:launch
 
 ## Device / TV connection
 
-Set the target device by following:
+Configure a target interactively when needed, then use the credential-safe listing wrapper:
 
 ```bash
 ares-setup-device
-ares-setup-device --list
+npm run webos:devices
 ```
 
-Use environment overrides if desired (copy values from `.env.example`):
+Use a process-environment fallback if desired:
 
 - `PTV_WEBOS_TEST_DEVICE`
 
@@ -61,6 +61,10 @@ Example:
 ```bash
 $env:PTV_WEBOS_TEST_DEVICE="PiggieTV-LG"   # PowerShell
 ```
+
+The Node-based webOS helpers do not load `.env`; export this value in the current shell or pass
+`--device PiggieTV-LG` explicitly. Hosted mode accepts the workstation-reachable address with
+`--host-ip <ip>` (or `PTV_WEBOS_HOST_IP`) and serves only a staged production build.
 
 ## Safety notes
 

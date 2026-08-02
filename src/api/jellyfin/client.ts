@@ -137,18 +137,23 @@ export class JellyfinApiClient {
 
   public async validateServer(timeoutMs = 10000, requestConfig: RequestExtras = {}, signal?: AbortSignal): Promise<PtvSystemInfo> {
     const system = await this.get<PtvSystemInfo>('System/Info/Public', undefined, timeoutMs, signal, requestConfig);
+    const serverId = typeof system?.ServerId === 'string' && system.ServerId.trim()
+      ? system.ServerId.trim()
+      : typeof system?.Id === 'string'
+        ? system.Id.trim()
+        : '';
     if (
       !system ||
-      typeof system.ServerId !== 'string' || !system.ServerId.trim() ||
+      !serverId ||
       typeof system.Version !== 'string' || !system.Version.trim()
     ) {
       throw toPtvError('Server identity response is incomplete', 'invalid-server-response');
     }
-    return system;
+    return { ...system, ServerId: serverId };
   }
 
   public getSystemInfo(timeoutMs = 10000, requestConfig: RequestExtras = {}, signal?: AbortSignal): Promise<PtvSystemInfo> {
-    return this.get<PtvSystemInfo>('System/Info/Public', undefined, timeoutMs, signal, requestConfig);
+    return this.validateServer(timeoutMs, requestConfig, signal);
   }
 
   public async discoverCapabilities(timeoutMs = 10000, signal?: AbortSignal): Promise<PtvCapability[]> {

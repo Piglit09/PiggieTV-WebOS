@@ -1,28 +1,14 @@
 #!/usr/bin/env node
 
-const { execSync } = require('child_process');
+const { runInspector } = require('./webos-inspect.cjs');
 
-function readCliDeviceAlias() {
-  const args = process.argv.slice(2);
-  const deviceIndex = args.findIndex((value) => value === '--device' || value === '-d');
-  if (deviceIndex >= 0 && deviceIndex + 1 < args.length) {
-    return args[deviceIndex + 1];
-  }
-  return null;
+try {
+  console.log('PiggieTV web-app logs are available in the Web Inspector Console.');
+  console.log('The inspector URL will be printed below; no browser is opened automatically.');
+  runInspector();
+  console.log('Open the URL, select Console, enable Preserve log, and redact sensitive data before sharing.');
+} catch (error) {
+  const message = error instanceof Error ? error.message : 'Could not start the Web Inspector log workflow.';
+  console.error(message);
+  process.exitCode = 1;
 }
-
-function readDeviceAlias() {
-  return process.env.PTV_WEBOS_TEST_DEVICE ?? readCliDeviceAlias();
-}
-
-function requireDeviceAlias() {
-  const alias = readDeviceAlias();
-  if (!alias) {
-    console.error('Missing webOS device alias. Set PTV_WEBOS_TEST_DEVICE or pass --device <alias>.');
-    process.exit(1);
-  }
-  return alias;
-}
-
-const device = requireDeviceAlias();
-execSync(`ares-novacom -i -d "${device}" --tail`, { stdio: 'inherit' });

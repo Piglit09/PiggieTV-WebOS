@@ -9,6 +9,7 @@ export function QuickConnectScreen() {
   const { state, dispatch, services } = useApp();
   const [sessionState, setSessionState] = useState(() => services.session.getState());
   const [retryKey, setRetryKey] = useState(0);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
 
   useEffect(() => services.session.subscribe(setSessionState), [services.session]);
 
@@ -37,6 +38,7 @@ export function QuickConnectScreen() {
       : sessionState.status === 'error'
         ? 'Quick Connect stopped.'
         : 'Waiting for the server…';
+  const diagnostic = services.session.getDiagnosticSnapshot();
 
   return (
     <LayoutShell title="Quick Connect" onBack={goBack}>
@@ -56,7 +58,21 @@ export function QuickConnectScreen() {
             Retry
           </FocusableButton>
           <FocusableButton focusId="qc-back" onClick={goBack}>Back</FocusableButton>
+          <FocusableButton
+            focusId="qc-diagnostics-toggle"
+            onClick={() => setDiagnosticsOpen(open => !open)}
+          >
+            {diagnosticsOpen ? 'Hide diagnostics' : 'Show diagnostics'}
+          </FocusableButton>
         </div>
+        {diagnosticsOpen ? (
+          <div className="ptv-auth-diagnostics">
+            <p>Attempt: {diagnostic?.attemptId ?? 'none'} · Stage: {diagnostic?.stage ?? 'IDLE'} · Status: {diagnostic?.status ?? 'idle'}</p>
+            <p>HTTP: {diagnostic?.httpStatus ?? 'n/a'} · Duration: {diagnostic?.durationMs ?? 0} ms · Result: {diagnostic?.resultClassification ?? 'pending'}</p>
+            <p>Navigation count: {diagnostic?.navigationRequestCount ?? 0} · Stale: {String(diagnostic?.stale ?? false)} · Cancelled: {String(diagnostic?.cancelled ?? false)}</p>
+            <p>Stages: {diagnostic?.stageHistory.slice(-12).map(entry => entry.stage).join(' → ') ?? 'none'}</p>
+          </div>
+        ) : null}
         {sessionState.status === 'error' && sessionState.errorMessage ? (
           <ErrorBanner
             message={sessionState.errorMessage}

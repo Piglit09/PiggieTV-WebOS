@@ -2,13 +2,13 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
+const { readAppInfo, runWebOsCli } = require('./webos-common.cjs');
 
 const root = process.cwd();
 const stagingDir = path.join(root, 'dist', '.ptv-webos-package');
 const outputDir = path.join(root, 'dist', 'pkgs');
-const inspectFlag = process.argv.includes('--inspect') ? '-v' : '';
-const appInfo = JSON.parse(fs.readFileSync(path.join(root, 'appinfo.json'), 'utf8'));
+const appInfo = readAppInfo(root);
 const appId = appInfo.id;
 const appVersion = appInfo.version;
 const appName = `${appId}_${appVersion}_all.ipk`;
@@ -27,7 +27,24 @@ function copyDirOrThrow(source, target) {
   fs.cpSync(source, target, { recursive: true, force: true });
 }
 
+function assertCleanWorktree() {
+  let status;
+  try {
+    status = execFileSync(
+      'git',
+      ['status', '--porcelain', '--untracked-files=normal'],
+      { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
+    );
+  } catch {
+    throw new Error('Release packaging requires this source tree to be inside a Git repository.');
+  }
+  if (status.trim()) {
+    throw new Error('Release packaging requires a clean Git worktree; commit or remove source changes first.');
+  }
+}
+
 function run() {
+  assertCleanWorktree();
   removePath(stagingDir);
   fs.mkdirSync(stagingDir, { recursive: true });
   removePath(outputDir);
@@ -61,8 +78,7 @@ function run() {
 
   fs.writeFileSync(stagingIndexPath, stagingIndexHtml);
 
-  const command = `ares-package "${stagingDir}" -o "${outputDir}" ${inspectFlag}`.trim();
-  execSync(command, { stdio: 'inherit' });
+  runWebOsCli('ares-package', [stagingDir, '-o', outputDir], { stdio: 'inherit' });
 
   const files = fs.readdirSync(outputDir).filter((entry) => entry.toLowerCase().endsWith('.ipk'));
   if (files.length !== 1) {
@@ -78,4 +94,13 @@ function run() {
   }
 }
 
-run();
+if (require.main === module) {
+  try {
+    run();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : 'webOS packaging failed.');
+    process.exitCode = 1;
+  }
+}
+
+module.exports = { assertCleanWorktree, run };

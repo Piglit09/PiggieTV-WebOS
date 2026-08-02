@@ -17,7 +17,7 @@ type ServerTestState = {
 };
 
 const SERVER_TEST_TIMEOUT_MS = 10_000;
-const showDiagnostics = import.meta.env.DEV || import.meta.env.MODE === 'test';
+const showDiagnostics = true;
 
 function stageLabel(state: SessionControllerState) {
   if (state.workflow === 'quick-connect') return 'Waiting for Quick Connect…';
@@ -52,6 +52,7 @@ export function AuthScreen() {
   const error = controllerState.status === 'error'
     ? controllerState.errorMessage
     : state.startupError;
+  const canRetrySavedSession = Boolean(state.startupError && services.storage.getState().session);
   const serverOrigin = useMemo(() => {
     try {
       return state.serverUrl ? new URL(state.serverUrl).origin : 'not configured';
@@ -211,15 +212,24 @@ export function AuthScreen() {
             <p>Origin: {diagnostic?.serverOrigin ?? serverOrigin} · HTTP: {diagnostic?.httpStatus ?? 'n/a'} · Duration: {diagnostic?.durationMs ?? 0} ms</p>
             <p>Result: {diagnostic?.resultClassification ?? 'pending'} · User: {diagnostic?.userIdSuffix ?? 'n/a'}</p>
             <p>
-              Persisted: {String(diagnostic?.persistenceSucceeded ?? false)} · API: {String(diagnostic?.apiContextUpdated ?? false)} · State: {String(diagnostic?.authStateCommitted ?? false)} · Navigation: {String(diagnostic?.navigationRequested ?? false)}
+              Persisted: {String(diagnostic?.persistenceSucceeded ?? false)} · API: {String(diagnostic?.apiContextUpdated ?? false)} · State: {String(diagnostic?.authStateCommitted ?? false)} · Navigation count: {diagnostic?.navigationRequestCount ?? 0}
             </p>
+            <p>Stages: {diagnostic?.stageHistory.map(entry => entry.stage).join(' → ') ?? 'none'}</p>
             <p>Stale: {String(diagnostic?.stale ?? false)} · Cancelled: {String(diagnostic?.cancelled ?? false)}</p>
             {serverTest.status !== 'idle' ? (
               <p>Server test: {serverTest.status} · HTTP: {serverTest.httpStatus ?? 'n/a'} · {serverTest.durationMs} ms · {serverTest.serverName ?? serverTest.errorMessage ?? ''} {serverTest.serverVersion ?? ''}</p>
             ) : null}
           </div>
         ) : null}
-        {error ? <ErrorBanner message={error} onRetry={handleSignIn} onBack={goBack} /> : null}
+        {error ? (
+          <ErrorBanner
+            message={error}
+            onRetry={canRetrySavedSession
+              ? () => dispatch({ type: 'retry_bootstrap' })
+              : handleSignIn}
+            onBack={goBack}
+          />
+        ) : null}
       </section>
     </LayoutShell>
   );

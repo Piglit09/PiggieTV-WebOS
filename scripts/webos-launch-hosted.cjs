@@ -1,43 +1,50 @@
 #!/usr/bin/env node
 
-const { execSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const { requireDeviceAlias, requireHostIp, runWebOsCli } = require('./webos-common.cjs');
 
-function readCliDeviceAlias() {
-  const args = process.argv.slice(2);
-  const deviceIndex = args.findIndex((value) => value === '--device' || value === '-d');
-  if (deviceIndex >= 0 && deviceIndex + 1 < args.length) {
-    return args[deviceIndex + 1];
+function stageHostedBuild(root = process.cwd()) {
+  const distDir = path.resolve(root, 'dist');
+  const hostedDir = path.resolve(distDir, '.ptv-webos-hosted');
+  if (path.dirname(hostedDir) !== distDir) {
+    throw new Error('Hosted staging directory resolved outside dist.');
   }
-  return null;
-}
 
-function readCliHost() {
-  const args = process.argv.slice(2);
-  const hostIndex = args.findIndex((value) => value === '--host' || value === '-i');
-  if (hostIndex >= 0 && hostIndex + 1 < args.length) {
-    return args[hostIndex + 1];
+  const required = [
+    path.join(root, 'appinfo.json'),
+    path.join(root, 'icon.png'),
+    path.join(root, 'build', 'index.html'),
+    path.join(root, 'build', 'assets')
+  ];
+  for (const source of required) {
+    if (!fs.existsSync(source)) {
+      throw new Error(`Hosted build input is missing: ${source}`);
+    }
   }
-  return null;
+
+  if (fs.existsSync(hostedDir)) fs.rmSync(hostedDir, { recursive: true, force: true });
+  fs.mkdirSync(hostedDir, { recursive: true });
+  fs.copyFileSync(path.join(root, 'appinfo.json'), path.join(hostedDir, 'appinfo.json'));
+  fs.copyFileSync(path.join(root, 'icon.png'), path.join(hostedDir, 'icon.png'));
+  fs.copyFileSync(path.join(root, 'build', 'index.html'), path.join(hostedDir, 'index.html'));
+  fs.cpSync(path.join(root, 'build', 'assets'), path.join(hostedDir, 'assets'), { recursive: true });
+  return hostedDir;
 }
 
-function readDeviceAlias() {
-  return process.env.PTV_WEBOS_TEST_DEVICE ?? readCliDeviceAlias();
-}
-
-function requireDeviceAlias() {
-  const alias = readDeviceAlias();
-  if (!alias) {
-    console.error('Missing webOS device alias. Set PTV_WEBOS_TEST_DEVICE or pass --device <alias>.');
-    process.exit(1);
+function main() {
+  try {
+    const hostIp = requireHostIp();
+    const device = requireDeviceAlias();
+    const hostedDir = stageHostedBuild();
+    console.log(`Launching staged hosted build via workstation IP ${hostIp} on device ${device}.`);
+    runWebOsCli('ares-launch', ['-H', hostedDir, '-I', hostIp, '-d', device], { stdio: 'inherit' });
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : 'Hosted webOS launch failed.');
+    process.exitCode = 1;
   }
-  return alias;
 }
 
-const host = process.env.PTV_WEBOS_TEST_HOST ?? readCliHost();
-if (!host) {
-  console.error('Missing TV host for hosted launch. Set PTV_WEBOS_TEST_HOST or pass --host <ip>.');
-  process.exit(1);
-}
-const device = requireDeviceAlias();
-console.log(`Launching hosted build on ${host} for device ${device}.`);
-execSync(`ares-launch -H . -d "${device}" -I ${host}`, { stdio: 'inherit' });
+if (require.main === module) main();
+
+module.exports = { stageHostedBuild };

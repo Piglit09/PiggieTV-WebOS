@@ -12,12 +12,14 @@
 | Application ID | `com.piggietv.webosnative` |
 | Application version | `0.1.0` |
 | Package | `dist/pkgs/com.piggietv.webosnative_0.1.0_all.ipk` |
+| Configured TV alias | `PiggieTV-LG` |
+| Configured TV endpoint | `10.16.0.231:9922` |
 
 ## Evidence policy and current hardware status
 
 Automated tests, a production build, and package inspection are software evidence. They do not prove behavior on an LG television. Emulator and desktop/jsdom runs also cannot certify the hardware decoder, media-format support, real Magic Remote event behavior, webOS application exit, TLS/network conditions, overscan, or on-device performance.
 
-**Physical-TV status for this Phase 1 coding pass: not executed.** Every unchecked item in the manual checklist below remains an unexecuted hardware acceptance check until a tester runs it on the named LG model and records the result. Do not convert an automated pass into a checked hardware item.
+Record physical-TV execution in the acceptance report for the exact candidate IPK. Every unchecked item in the manual checklist below remains unexecuted until a tester runs it on the named LG model and records the result. Do not convert an automated pass into a checked hardware item.
 
 ## Automated validation gate
 
@@ -46,13 +48,38 @@ Record command, exit code, and artifact path in the acceptance report. These ass
 
 ## Packaging and install flow
 
-1. Run the automated validation gate and retain the exact candidate package. `npm run package` performs a production build before invoking the webOS packager.
-2. List configured targets with `npm run webos:devices` or add the TV with `ares-setup-device`.
-3. Install the package with `npm run webos:install`.
-4. Launch it with `npm run webos:launch`.
-5. Follow device output with `npm run webos:logs` while running the checklist.
+1. Commit the candidate source, confirm the Git worktree is clean, run the automated validation gate, and retain the exact candidate package. `npm run package` refuses a dirty source tree and performs a production build before invoking the webOS packager; diagnostics embed the authoritative `appinfo.json` identity and committed Git revision.
+2. List configured aliases with `npm run webos:devices`. This wrapper deliberately omits credential and passphrase fields.
+3. Confirm the physical target with `npm run webos:device:info -- --device PiggieTV-LG`.
+4. Install the exact existing package with `npm run webos:install -- --device PiggieTV-LG`.
+5. Launch it with `npm run webos:launch -- --device PiggieTV-LG`.
+6. Route to Web Inspector Console with `npm run webos:logs -- --device PiggieTV-LG` while running the checklist.
 
-The previously documented `10.16.0.195` address is only an example local TV address. Use the address configured for the current test television; do not commit credentials, developer-mode keys, passwords, access tokens, or Quick Connect secrets.
+The current local mapping is `PiggieTV-LG` to `10.16.0.231:9922`; the alias, rather than the IP address, is passed to `--device`. An explicit `--device` value takes precedence over the optional `PTV_WEBOS_TEST_DEVICE` fallback. Do not use or paste raw `ares-setup-device --list` output because the installed CLI includes the Developer Mode passphrase column. Do not commit credentials, developer-mode keys, passwords, access tokens, or Quick Connect secrets.
+
+The Node helpers do not load `.env`. Export `PTV_WEBOS_TEST_DEVICE` in the active shell or use the explicit `--device` form shown above. Hosted mode builds and serves only `dist/.ptv-webos-hosted`; pass the workstation address reachable by the TV with `--host-ip <ip>` or `PTV_WEBOS_HOST_IP`.
+
+Close and relaunch without relying on the CLI's default device:
+
+```powershell
+npm run webos:close -- --device PiggieTV-LG
+npm run webos:launch -- --device PiggieTV-LG
+```
+
+The removed `webos:install:release` command passed an undocumented `--force` flag. Use the normal install command above for both first installation and updates.
+
+## Web Inspector and log capture
+
+`npm run webos:inspect -- --device PiggieTV-LG` invokes `ares-inspect` for `com.piggietv.webosnative`. It prints an inspector URL and intentionally does not open a browser. `npm run webos:logs -- --device PiggieTV-LG` routes to the same supported workflow with Console instructions; it does not run a broad device-log tail.
+
+1. Launch PiggieTV on the named target.
+2. Run either inspector command and open the printed URL locally.
+3. Select **Console** and enable **Preserve log** before reproducing the issue.
+4. Save or copy only the relevant interval and redact it before sharing.
+
+Keep local captures under the ignored repository roots `evidence/`, `artifacts/`, `diagnostics/`, or `screenshots/`. Do not save credentials, private keys, raw HAR files, or unreviewed inspector exports elsewhere in the source tree.
+
+The inspector's Network and Storage panels can reveal request bodies, authorization headers, persisted access tokens, and Quick Connect secrets. Treat the inspector URL and all captured output as private test evidence. Never attach an unreviewed inspector export or broad device log to an issue.
 
 ## Emulator smoke test
 
@@ -72,7 +99,7 @@ An emulator pass may catch packaging and layout regressions. It does not complet
 - [ ] Record tester, date/time, TV model `LG 70UN7070PUA`, television firmware/webOS version, and webOS SDK 5.6.2.
 - [ ] Record the package filename, application version, source revision if available, and package checksum.
 - [ ] Confirm `https://piggietv.com` is reachable from the TV and record the live Jellyfin version; note any difference from the reported 10.11.11 baseline.
-- [ ] Start device logs, install the candidate IPK, and verify a clean launch with no fatal JavaScript or packaging error.
+- [ ] Install and launch the candidate IPK, attach Web Inspector, enable Preserve log, then close and relaunch for the captured cold-launch check; verify no fatal JavaScript or packaging error.
 - [ ] Confirm the full UI stays inside visible safe margins at 1920×1080 with no clipped focus ring or critical text.
 
 ### Cold startup, password sign-in, and restore

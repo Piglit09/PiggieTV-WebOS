@@ -1,28 +1,82 @@
 #!/usr/bin/env node
 
-const { execSync } = require('child_process');
+const {
+  readAppInfo,
+  readCliOption,
+  readDeviceAlias,
+  requireDeviceAlias,
+  runWebOsCli
+} = require('./webos-common.cjs');
 
-function readCliDeviceAlias() {
-  const args = process.argv.slice(2);
-  const deviceIndex = args.findIndex((value) => value === '--device' || value === '-d');
-  if (deviceIndex >= 0 && deviceIndex + 1 < args.length) {
-    return args[deviceIndex + 1];
+function readCliDeviceAlias(args = process.argv.slice(2)) {
+  return readCliOption(args, ['--device', '-d'], '--device');
+}
+
+function formatSafeDeviceList(rawOutput) {
+  const devices = [];
+  const plainOutput = String(rawOutput).replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '');
+  for (const line of plainOutput.split(/\r?\n/)) {
+    const match = line.match(/^\s*(.*?)\s{2,}[^\s@]+@([^\s:]+):(\d+)\s{2,}/);
+    if (!match) continue;
+    const alias = match[1].trim().replace(/\s+\(default\)$/i, '');
+    devices.push({ alias, endpoint: `${match[2]}:${match[3]}` });
   }
-  return null;
-}
 
-function readDeviceAlias() {
-  return process.env.PTV_WEBOS_TEST_DEVICE ?? readCliDeviceAlias();
-}
-
-function requireDeviceAlias() {
-  const alias = readDeviceAlias();
-  if (!alias) {
-    console.error('Missing webOS device alias. Set PTV_WEBOS_TEST_DEVICE or pass --device <alias>.');
-    process.exit(1);
+  if (devices.length === 0) {
+    throw new Error('Could not parse the webOS device list without exposing credential fields.');
   }
-  return alias;
+
+  return [
+    'Configured webOS devices (credential fields omitted):',
+    ...devices.map((device) => `- ${device.alias}: ${device.endpoint}`)
+  ].join('\n');
 }
 
-const device = requireDeviceAlias();
-execSync(`ares-device -i -d "${device}"`, { stdio: 'inherit' });
+function listDevices(execute = runWebOsCli) {
+  const output = execute('ares-setup-device', ['--list'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  console.log(formatSafeDeviceList(output));
+}
+
+function buildInspectorArgs(args = process.argv.slice(2), env = process.env, root = process.cwd()) {
+  const device = requireDeviceAlias(args, env);
+  const appId = readAppInfo(root).id;
+  return [appId, '-d', device];
+}
+
+function runInspector(options = {}) {
+  const execute = options.execute ?? runWebOsCli;
+  const args = buildInspectorArgs(options.args, options.env, options.root);
+  execute('ares-inspect', args, { stdio: 'inherit' });
+}
+
+function main() {
+  const listRequested = process.argv.slice(2).includes('--list');
+  try {
+    if (listRequested) {
+      listDevices();
+      return;
+    }
+    runInspector();
+  } catch (error) {
+    const message = listRequested
+      ? 'Could not safely list configured webOS devices.'
+      : error instanceof Error
+        ? error.message
+        : 'webOS inspection failed.';
+    console.error(message);
+    process.exitCode = 1;
+  }
+}
+
+if (require.main === module) main();
+
+module.exports = {
+  buildInspectorArgs,
+  formatSafeDeviceList,
+  readCliDeviceAlias,
+  readDeviceAlias,
+  runInspector
+};

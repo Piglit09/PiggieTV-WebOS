@@ -1,6 +1,7 @@
 import type { PtvItemKind } from '../../types/ptv';
 
 export interface PtvSystemInfo {
+  Id?: string;
   LocalAddress?: string;
   ServerName: string;
   ServerId: string;

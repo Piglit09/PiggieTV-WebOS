@@ -12,11 +12,15 @@ interface DiagnosticsLog {
 
 export interface DiagnosticsSnapshotInput {
   appVersion: string;
+  packageId: string;
   buildTimestamp: string;
   mode: 'development' | 'production';
   route: string;
+  previousRoute: string | null;
   focusId: string | null;
   previousFocusId: string | null;
+  userAgent: string;
+  visibilityState: string;
   playbackState?: string;
   playbackDecision?: string | null;
   mediaCodecs?: string;
@@ -30,7 +34,15 @@ export interface DiagnosticsSnapshotInput {
   commitHash?: string | null;
   ptvPluginVersion?: string | null;
   ptvApiVersion?: string | null;
-  token?: string | null;
+  currentSession?: {
+    envelopeSchemaVersion: number | null;
+    sessionSchemaVersion: number | null;
+    sessionPresent: boolean;
+    inMemorySessionPresent: boolean;
+    tokenPresent: boolean;
+    serverUrl?: string | null;
+    userId?: string | null;
+  } | null;
 }
 
 export class DiagnosticsService {
@@ -38,8 +50,14 @@ export class DiagnosticsService {
   private lastUiError: string | null = null;
   private lastPlaybackError: string | null = null;
   private sessionSnapshot: Record<string, unknown> | null = null;
+  private sessionRestoreSnapshot: Record<string, unknown> | null = null;
   private playbackSnapshot: Record<string, unknown> | null = null;
+  private sessionRestoreEvents: Array<Record<string, unknown>> = [];
+  private inputEvents: Array<Record<string, unknown>> = [];
+  private lifecycleEvents: Array<Record<string, unknown>> = [];
+  private navigationEvents: Array<Record<string, unknown>> = [];
   private focusTransitions: Array<Record<string, unknown>> = [];
+  private lastRouteFocusRestore: Record<string, unknown> | null = null;
   private logSequence = 0;
   private readonly maxLogs = 200;
   private requestTracker?: RequestTracker;
@@ -72,17 +90,40 @@ export class DiagnosticsService {
     this.push('error', safeMessage);
   }
 
-  public recordSessionSnapshot(snapshot: Record<string, unknown>) {
+  public recordSessionSnapshot(snapshot: object) {
     this.sessionSnapshot = this.sanitizeRecord(snapshot);
   }
 
-  public recordPlaybackSnapshot(snapshot: Record<string, unknown>) {
+  public recordSessionRestore(snapshot: object) {
+    const safeSnapshot = this.withTimestamp(snapshot);
+    this.sessionRestoreSnapshot = safeSnapshot;
+    this.pushBounded(this.sessionRestoreEvents, safeSnapshot, 30);
+  }
+
+  public recordPlaybackSnapshot(snapshot: object) {
     this.playbackSnapshot = this.sanitizeRecord(snapshot);
   }
 
-  public recordFocusTransition(transition: Record<string, unknown>) {
-    this.focusTransitions.push(this.sanitizeRecord(transition));
-    if (this.focusTransitions.length > 30) this.focusTransitions.shift();
+  public recordInputEvent(event: object) {
+    this.pushBounded(this.inputEvents, this.withTimestamp(event), 40);
+  }
+
+  public recordLifecycleEvent(event: string | object) {
+    const record = typeof event === 'string' ? { event } : event;
+    this.pushBounded(this.lifecycleEvents, this.withTimestamp(record), 30);
+  }
+
+  public recordNavigationEvent(event: object) {
+    this.pushBounded(this.navigationEvents, this.withTimestamp(event), 30);
+  }
+
+  public recordFocusTransition(transition: object) {
+    const safeTransition = this.sanitizeRecord(transition);
+    this.pushBounded(this.focusTransitions, safeTransition, 30);
+    const reason = safeTransition.reason;
+    if (reason === 'route-restore' || reason === 'route-fallback' || reason === 'route-change') {
+      this.lastRouteFocusRestore = { ...safeTransition };
+    }
   }
 
   public resetErrors() {
@@ -93,9 +134,20 @@ export class DiagnosticsService {
   public snapshot(input: DiagnosticsSnapshotInput): PtvDiagnosticsSnapshot {
     const safeUrl = this.redactServerUrl(input.serverUrl);
     const safeUser = this.redactSensitive(input.userId);
+    const lastRouteChange = this.navigationEvents
+      .slice()
+      .reverse()
+      .find(event => event.type === 'route-change');
+    const recordedPreviousRoute = lastRouteChange?.previousRoute;
+    const recordedPlaybackState = this.playbackSnapshot?.state;
+    const recordedPlaybackDecision = this.playbackSnapshot?.decision;
+    const recordedVideoCodec = this.playbackSnapshot?.videoCodec;
+    const recordedAudioCodec = this.playbackSnapshot?.audioCodec;
+    const recordedPosition = this.playbackSnapshot?.currentTime;
 
     return {
       appVersion: input.appVersion,
+      packageId: input.packageId,
       buildTimestamp: input.buildTimestamp,
       commitHash: input.commitHash ?? null,
       mode: input.mode,
@@ -103,6 +155,8 @@ export class DiagnosticsService {
       tvModel: this.safeRead(() => (window as any).webOS?.deviceInfo?.productName || null),
       viewport: `${window.innerWidth}x${window.innerHeight}`,
       dpr: window.devicePixelRatio ?? 1,
+      userAgent: redactSensitiveText(input.userAgent),
+      visibilityState: input.visibilityState,
       serverVersion: input.serverVersion ?? null,
       serverUrl: safeUrl,
       userId: safeUser,
@@ -110,6 +164,7 @@ export class DiagnosticsService {
       pluginApiVersion: input.ptvApiVersion ?? null,
       capabilities: input.capabilities,
       currentRoute: input.route,
+      previousRoute: typeof recordedPreviousRoute === 'string' ? recordedPreviousRoute : input.previousRoute,
       currentFocusId: input.focusId,
       previousFocusId: input.previousFocusId,
       activeRequests: this.requestTracker?.getActiveCount() ?? 0,
@@ -141,21 +196,52 @@ export class DiagnosticsService {
       requestDurations: this.requestTracker?.getRecentDurations(30) ?? [],
       recentFailures: this.requestTracker?.getRecentErrors(20) ?? [],
       memoryEstimate: this.safeRead(() => (performance as any).memory?.usedJSHeapSize),
-      playbackState: input.playbackState ?? 'idle',
-      playbackDecision: input.playbackDecision ?? null,
-      mediaCodecs: input.mediaCodecs,
-      lastLifecycleEvent: input.lastLifecycleEvent ?? null,
+      playbackState: input.playbackState
+        ?? (typeof recordedPlaybackState === 'string' ? recordedPlaybackState : 'idle'),
+      playbackDecision: input.playbackDecision
+        ?? (typeof recordedPlaybackDecision === 'string' ? recordedPlaybackDecision : null),
+      mediaCodecs: input.mediaCodecs ?? (
+        [recordedVideoCodec, recordedAudioCodec]
+          .filter((codec): codec is string => typeof codec === 'string' && codec.length > 0)
+          .join('/') || undefined
+      ),
+      lastLifecycleEvent: input.lastLifecycleEvent ?? this.getLastEventLabel(this.lifecycleEvents),
       lastPlaybackError: this.lastPlaybackError,
       lastUiError: this.lastUiError,
-      currentPositionTicks: undefined,
+      currentPositionTicks: typeof recordedPosition === 'number' && Number.isFinite(recordedPosition)
+        ? Math.max(0, Math.round(recordedPosition * 10_000_000))
+        : undefined,
       authentication: this.sessionSnapshot ? { ...this.sessionSnapshot } : null,
+      currentSession: input.currentSession ? {
+        envelopeSchemaVersion: input.currentSession.envelopeSchemaVersion,
+        sessionSchemaVersion: input.currentSession.sessionSchemaVersion,
+        sessionPresent: input.currentSession.sessionPresent,
+        inMemorySessionPresent: input.currentSession.inMemorySessionPresent,
+        tokenPresent: input.currentSession.tokenPresent,
+        serverOrigin: input.currentSession.serverUrl
+          ? this.redactServerUrl(input.currentSession.serverUrl)
+          : null,
+        userIdSuffix: this.redactSensitive(input.currentSession.userId)
+      } : null,
+      sessionRestore: this.sessionRestoreSnapshot ? { ...this.sessionRestoreSnapshot } : null,
+      recentSessionRestoreEvents: this.sessionRestoreEvents.slice(-12).map(event => ({ ...event })),
       playbackDetails: this.playbackSnapshot ? { ...this.playbackSnapshot } : null,
-      recentFocusTransitions: this.focusTransitions.slice(-12)
+      lastInputEvent: this.getLastEvent(this.inputEvents),
+      recentInputEvents: this.inputEvents.slice(-16).map(event => ({ ...event })),
+      lastNavigationEvent: this.getLastEvent(this.navigationEvents),
+      recentNavigationEvents: this.navigationEvents.slice(-12).map(event => ({ ...event })),
+      recentLifecycleEvents: this.lifecycleEvents.slice(-12).map(event => ({ ...event })),
+      lastRouteFocusRestore: this.lastRouteFocusRestore ? { ...this.lastRouteFocusRestore } : null,
+      recentFocusTransitions: this.focusTransitions.slice(-12).map(event => ({ ...event }))
     };
   }
 
-  public toDiagnosticText(snapshot: PtvDiagnosticsSnapshot) {
-    return redactSensitiveText(JSON.stringify(snapshot, null, 2));
+  public toDiagnosticText(snapshot: unknown) {
+    try {
+      return redactSensitiveText(JSON.stringify(snapshot, null, 2) ?? '[diagnostics unavailable]');
+    } catch {
+      return '[diagnostics unavailable]';
+    }
   }
 
   public getRecentLogs() {
@@ -190,12 +276,64 @@ export class DiagnosticsService {
     return redactSensitiveText(value);
   }
 
-  private sanitizeRecord(input: Record<string, unknown>) {
+  private sanitizeRecord(input: object) {
     try {
-      return JSON.parse(this.redactSecrets(JSON.stringify(input))) as Record<string, unknown>;
+      const safe = JSON.parse(JSON.stringify(input)) as Record<string, unknown>;
+      return this.sanitizeKnownFields(safe) as Record<string, unknown>;
     } catch {
       return { error: '[unserializable diagnostics]' };
     }
+  }
+
+  private sanitizeKnownFields(value: unknown, key = ''): unknown {
+    if (Array.isArray(value)) {
+      return value.map(item => this.sanitizeKnownFields(item));
+    }
+    if (value && typeof value === 'object') {
+      return Object.keys(value as Record<string, unknown>).reduce<Record<string, unknown>>((result, childKey) => {
+        result[childKey] = this.sanitizeKnownFields((value as Record<string, unknown>)[childKey], childKey);
+        return result;
+      }, {});
+    }
+    if (typeof value !== 'string') return value;
+
+    const normalizedKey = key.replace(/[^a-z0-9]/gi, '').toLowerCase();
+    if (
+      normalizedKey === 'token' ||
+      normalizedKey === 'accesstoken' ||
+      normalizedKey === 'apikey' ||
+      normalizedKey === 'authorization' ||
+      normalizedKey === 'password' ||
+      normalizedKey === 'secret' ||
+      normalizedKey === 'code'
+    ) {
+      return '[redacted]';
+    }
+    if (normalizedKey === 'userid') return this.redactSensitive(value);
+    if (normalizedKey === 'serverurl' || normalizedKey === 'serverorigin') return this.redactServerUrl(value);
+    return redactSensitiveText(value);
+  }
+
+  private withTimestamp(input: object) {
+    const candidate = input as Record<string, unknown>;
+    return this.sanitizeRecord({ timestamp: Date.now(), ...candidate });
+  }
+
+  private pushBounded(target: Array<Record<string, unknown>>, event: Record<string, unknown>, maximum: number) {
+    target.push({ ...event });
+    while (target.length > maximum) target.shift();
+  }
+
+  private getLastEvent(events: Array<Record<string, unknown>>) {
+    const event = events[events.length - 1];
+    return event ? { ...event } : null;
+  }
+
+  private getLastEventLabel(events: Array<Record<string, unknown>>) {
+    const event = events[events.length - 1];
+    if (!event) return null;
+    const label = event.event ?? event.name ?? event.type;
+    return typeof label === 'string' ? label : null;
   }
 
   private redactServerUrl(rawUrl: string) {
@@ -206,7 +344,8 @@ export class DiagnosticsService {
       if (parts.length > 2) {
         parts[0] = '***';
       }
-      return `${parsed.protocol}//${parts.join('.')} (redacted)`;
+      const port = parsed.port ? `:${parsed.port}` : '';
+      return `${parsed.protocol}//${parts.join('.')}${port} (redacted)`;
     } catch {
       return '[redacted-server]';
     }
@@ -214,7 +353,7 @@ export class DiagnosticsService {
 
   private redactSensitive(input?: string | null) {
     if (!input) return '[redacted]';
-    return `${input.slice(0, 6)}...${input.slice(-4)}`;
+    return input.length > 4 ? `...${input.slice(-4)}` : '[redacted]';
   }
 
   private safeRead<T>(fn: () => T) {

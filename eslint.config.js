@@ -28,5 +28,25 @@ export default [
       'react-hooks/exhaustive-deps': 'warn',
       'no-console': 'off'
     }
+  },
+  {
+    files: ['scripts/**/*.cjs'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'commonjs',
+      globals: {
+        Buffer: 'readonly',
+        __dirname: 'readonly',
+        __filename: 'readonly',
+        console: 'readonly',
+        module: 'readonly',
+        process: 'readonly',
+        require: 'readonly'
+      }
+    },
+    rules: {
+      'no-console': 'off',
+      'no-control-regex': 'off'
+    }
   }
 ];

@@ -17,16 +17,22 @@ vite.config.ts.timestamp*
 *.pfx
 *.keystore
 *.jks
+*.crt
+*.cer
+*.har
 .ares/
 .webos/
+.ssh/
 webos-device*.json
+novacom-devices.json
+webos_emul
 
 # Generated webOS package material
 *.ipk
 *.tar.gz
 
 # Local hardware-test evidence and diagnostic exports
-artifacts/
-evidence/
-diagnostics/
-screenshots/
+/artifacts/
+/evidence/
+/diagnostics/
+/screenshots/

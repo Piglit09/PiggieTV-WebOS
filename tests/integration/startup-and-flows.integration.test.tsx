@@ -219,6 +219,29 @@ describe('integration: startup and canonical session restore', () => {
     expect(stored.session).toBeNull();
     expect(mockSetAccessToken).toHaveBeenLastCalledWith(undefined);
   });
+
+  it('retains a saved session after a transient restore failure and retries Users/Me', async () => {
+    seedSession();
+    mockValidateSession
+      .mockRejectedValueOnce({
+        kind: 'network-error',
+        message: 'Temporary network failure',
+        recoverable: true
+      })
+      .mockResolvedValueOnce({ Id: 'user-1', Name: 'Stored User' });
+    render(<App />);
+
+    const retry = await screen.findByRole('button', { name: /retry/i });
+    const afterFailure = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as { session?: unknown };
+    expect(afterFailure.session).not.toBeNull();
+
+    fireEvent.click(retry);
+    await screen.findByRole('heading', { name: 'PiggieTV' });
+
+    expect(mockValidateSession).toHaveBeenCalledTimes(2);
+    const afterRetry = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as { session?: unknown };
+    expect(afterRetry.session).not.toBeNull();
+  });
 });
 
 describe('integration: password authentication ownership', () => {
@@ -359,6 +382,112 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
     await waitFor(() => expect(document.activeElement).toBe(detailsPlay));
     expect(load).toHaveBeenCalledTimes(2);
     expect(mockReportStopped).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops active playback and clears the media source on pagehide', async () => {
+    const load = vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+    seedSession();
+    mockGetResume.mockResolvedValue({ Items: [{ Id: 'movie-1', Name: 'Featured Movie', Type: 'Movie' }] });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Featured Movie' }));
+    await screen.findByText('Overview');
+    fireEvent.click(screen.getByRole('button', { name: /^play$/i }));
+
+    const video = document.querySelector('video') as HTMLVideoElement;
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+    Object.defineProperties(video, {
+      readyState: { configurable: true, value: 3 },
+      duration: { configurable: true, value: 120 },
+      currentTime: { configurable: true, writable: true, value: 12 }
+    });
+    fireEvent.loadedData(video);
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mockReportPlaying).toHaveBeenCalledTimes(1));
+    expect(video.hasAttribute('src')).toBe(true);
+
+    const pagehide = new Event('pagehide');
+    Object.defineProperty(pagehide, 'persisted', { value: false });
+    window.dispatchEvent(pagehide);
+
+    await waitFor(() => expect(mockReportStopped).toHaveBeenCalledTimes(1));
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(video.hasAttribute('src')).toBe(false);
+  });
+
+  it('shows live safe session state and actual lifecycle listener ownership after sign-out', async () => {
+    seedSession();
+    render(<App />);
+    await screen.findByRole('heading', { name: 'PiggieTV' });
+    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    await screen.findByRole('heading', { name: 'Application' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next section' }));
+    await screen.findByRole('heading', { name: 'Authentication and session restore' });
+    await waitFor(() => {
+      const output = document.querySelector('.ptv-diagnostics__output')?.textContent ?? '';
+      expect(output).toContain('"sessionPresent": true');
+      expect(output).toContain('"inMemorySessionPresent": true');
+      expect(output).toContain('"tokenPresent": true');
+      expect(output).not.toContain('stored-token');
+    });
+
+    for (let page = 0; page < 3; page += 1) {
+      fireEvent.click(screen.getByRole('button', { name: 'Next section' }));
+    }
+    await screen.findByRole('heading', { name: 'Lifecycle and errors' });
+    await waitFor(() => {
+      const output = document.querySelector('.ptv-diagnostics__output')?.textContent ?? '';
+      expect(output).toContain('"listenerOwnerCount": 1');
+      expect(output).toContain('"duplicateListenerOwnership": false');
+      expect(output).not.toContain('"duplicateListenerOwnership": true');
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /^Back$/i }));
+    await screen.findByRole('heading', { name: 'PiggieTV' });
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign out' }));
+    await waitForAuth();
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Open diagnostics' }));
+    await screen.findByRole('heading', { name: 'Application' });
+    fireEvent.click(screen.getByRole('button', { name: 'Next section' }));
+    await screen.findByRole('heading', { name: 'Authentication and session restore' });
+    await waitFor(() => {
+      const output = document.querySelector('.ptv-diagnostics__output')?.textContent ?? '';
+      expect(output).toContain('"sessionPresent": false');
+      expect(output).toContain('"inMemorySessionPresent": false');
+      expect(output).toContain('"tokenPresent": false');
+    });
+  });
+
+  it('never renders a token-bearing raw playback rejection', async () => {
+    const secret = 'ui-play-secret';
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockRejectedValue(
+      new Error(`Play denied at https://server.example.com/Videos/item/stream?api_key=${secret}`)
+    );
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+    seedSession();
+    mockGetResume.mockResolvedValue({ Items: [{ Id: 'movie-1', Name: 'Featured Movie', Type: 'Movie' }] });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Featured Movie' }));
+    await screen.findByText('Overview');
+    fireEvent.click(screen.getByRole('button', { name: /^play$/i }));
+
+    const video = document.querySelector('video') as HTMLVideoElement;
+    Object.defineProperties(video, {
+      readyState: { configurable: true, value: 3 },
+      duration: { configurable: true, value: 120 },
+      currentTime: { configurable: true, writable: true, value: 0 }
+    });
+    fireEvent.loadedData(video);
+
+    await screen.findByText(/\*\*\*redacted\*\*\*/i);
+    expect(document.body.textContent).not.toContain(secret);
   });
 
   it('sign-out clears memory, API authorization, persistence, and route history', async () => {

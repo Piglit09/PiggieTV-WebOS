@@ -6,13 +6,15 @@ import {
   type PlaybackDiagnosticsSnapshot,
   type PlaybackEngineState
 } from '../../playback/engine';
-import { resolvePlaybackStreamUrl } from '../../api/jellyfin/client';
+import { JellyfinApiClient, resolvePlaybackStreamUrl } from '../../api/jellyfin/client';
 import { FocusableButton } from '../../components/FocusableButton';
 import { formatMediaDuration, formatMediaTime } from '../../utils/format';
 import { toRouteString } from '../../navigation/router';
+import { redactSensitiveText } from '../../core/redaction';
 
 type PlaybackRuntime = {
   client: ReturnType<ReturnType<typeof useApp>['services']['jellyfin']['getClient']>;
+  serverUrl: string;
   itemId: string;
   userId: string;
   accessToken: string;
@@ -22,14 +24,30 @@ type PlaybackRuntime = {
   subtitleStreamIndex?: number | null;
 } | null;
 
+type ActivePlaybackRuntime = Exclude<PlaybackRuntime, null>;
+type PlaybackReportingRuntime = Pick<ActivePlaybackRuntime, 'client' | 'itemId'>;
+
 const emptySnapshot: PlaybackDiagnosticsSnapshot = {
   attemptId: null,
+  activeAttemptId: null,
   state: 'idle',
   itemIdSuffix: null,
   mediaSourceIdSuffix: null,
   container: null,
   videoCodec: null,
   audioCodec: null,
+  sourceContainer: null,
+  sourceVideoCodec: null,
+  sourceAudioCodec: null,
+  requestedOutputProtocol: null,
+  requestedOutputContainer: null,
+  requestedOutputVideoCodec: null,
+  requestedOutputAudioCodec: null,
+  selectedOutputProtocol: null,
+  selectedOutputContainer: null,
+  selectedOutputVideoCodec: null,
+  selectedOutputAudioCodec: null,
+  selectedOutputEvidence: null,
   decision: null,
   finalUrlOrigin: null,
   finalUrlPathCategory: null,
@@ -40,20 +58,41 @@ const emptySnapshot: PlaybackDiagnosticsSnapshot = {
   paused: true,
   ended: false,
   canSeek: false,
+  bufferedRanges: { count: 0, ranges: [], totalSeconds: 0, truncated: false },
+  seekableRanges: { count: 0, ranges: [], totalSeconds: 0, truncated: false },
+  sourcePresent: false,
+  progressReportingActive: false,
+  lastStopReason: null,
   lastMediaEvent: null,
+  mediaEventHistory: [],
+  mediaEventHistoryTruncated: false,
+  mediaEventCounts: {},
+  lastMediaErrorCode: null,
+  lastMediaErrorMessage: null,
+  lastPlayPromiseResult: null,
+  lastPlayPromiseError: null,
   lastPlayerError: null,
   sourceAssignments: 0,
   loadCalls: 0,
   playCalls: 0,
   playingReports: 0,
   progressReports: 0,
-  stoppedReports: 0
+  stoppedReports: 0,
+  reportEvidence: {
+    queued: { playing: 0, progress: 0, stopped: 0 },
+    attempted: { playing: 0, progress: 0, stopped: 0 },
+    succeeded: { playing: 0, progress: 0, stopped: 0 },
+    failed: { playing: 0, progress: 0, stopped: 0 },
+    skipped: { playing: 0, progress: 0, stopped: 0 },
+    last: null
+  }
 };
 
 export function PlaybackScreen() {
   const { state, dispatch, services } = useApp();
   const videoRef = useRef<HTMLVideoElement>(null);
   const runtimeRef = useRef<PlaybackRuntime>(null);
+  const reportingRuntimeByAttemptRef = useRef<Map<string, PlaybackReportingRuntime>>(new Map());
   const engineRef = useRef<PlaybackEngine | null>(null);
   const hideControlsTimer = useRef<number | null>(null);
   const playerStateRef = useRef<PlaybackEngineState>('idle');
@@ -68,6 +107,7 @@ export function PlaybackScreen() {
   if (intent && userSession && state.serverUrl) {
     runtimeRef.current = {
       client: services.jellyfin.configureSession(state.serverUrl, userSession.accessToken),
+      serverUrl: state.serverUrl,
       itemId: intent.itemId,
       userId: intent.userId,
       accessToken: userSession.accessToken,
@@ -117,57 +157,115 @@ export function PlaybackScreen() {
           });
           const source = playbackInfo.MediaSources?.find(candidate => candidate.Id === decision.mediaSourceId);
           if (!source) throw new Error('Jellyfin did not return a playable media source');
+          const sourceVideoStream = source.MediaStreams?.find(stream => stream.Type === 'Video');
+          const sourceAudioStream = source.MediaStreams?.find(stream => (
+            stream.Type === 'Audio' &&
+            typeof runtime.audioStreamIndex === 'number' &&
+            stream.Index === runtime.audioStreamIndex
+          )) ?? source.MediaStreams?.find(stream => stream.Type === 'Audio' && stream.IsDefault)
+            ?? source.MediaStreams?.find(stream => stream.Type === 'Audio');
+          const sourceVideoCodec = source.VideoCodec ?? sourceVideoStream?.Codec ?? null;
+          const sourceAudioCodec = source.AudioCodec ?? sourceAudioStream?.Codec ?? null;
+          const reportingClient = new JellyfinApiClient({
+            baseUrl: runtime.serverUrl,
+            accessToken: runtime.accessToken,
+            deviceId: runtime.deviceId,
+            requestTracker: services.requestTracker
+          });
+          reportingRuntimeByAttemptRef.current.set(context.attemptId, {
+            client: reportingClient,
+            itemId: runtime.itemId
+          });
+          while (reportingRuntimeByAttemptRef.current.size > 8) {
+            const oldestAttemptId = reportingRuntimeByAttemptRef.current.keys().next().value as string | undefined;
+            if (!oldestAttemptId) break;
+            reportingRuntimeByAttemptRef.current.delete(oldestAttemptId);
+          }
+          const streamUrl = resolvePlaybackStreamUrl(
+            runtime.serverUrl,
+            request.itemId,
+            source,
+            decision.mode,
+            runtime.accessToken,
+            runtime.deviceId
+          );
+          const transcodingRequested = decision.mode === 'transcode';
           return {
-            url: resolvePlaybackStreamUrl(
-              state.serverUrl as string,
-              request.itemId,
-              source,
-              decision.mode,
-              runtime.accessToken,
-              runtime.deviceId
-            ),
+            url: streamUrl,
             playSessionId: playbackInfo.PlaySessionId ?? null,
             mediaSourceId: source.Id,
             mode: decision.mode,
             container: source.Container,
-            videoCodec: source.VideoCodec,
-            audioCodec: source.AudioCodec
+            videoCodec: sourceVideoCodec,
+            audioCodec: sourceAudioCodec,
+            sourceContainer: source.Container,
+            sourceVideoCodec,
+            sourceAudioCodec,
+            requestedOutputProtocol: transcodingRequested ? 'hls' : 'http',
+            requestedOutputContainer: transcodingRequested
+              ? 'ts'
+              : decision.mode === 'direct-play'
+                ? source.Container
+                : null,
+            requestedOutputVideoCodec: transcodingRequested ? 'h264' : sourceVideoCodec,
+            requestedOutputAudioCodec: transcodingRequested ? 'aac' : sourceAudioCodec
           };
         },
         reportPlaying: async report => {
-          const runtime = runtimeRef.current;
-          if (!runtime || !report.playSessionId) return;
+          const runtime = reportingRuntimeByAttemptRef.current.get(report.attemptId);
+          if (!runtime) return { status: 'skipped' as const, reason: 'attempt-runtime-unavailable' };
+          if (runtime.itemId !== report.itemId) return { status: 'skipped' as const, reason: 'attempt-item-mismatch' };
+          if (!report.playSessionId) return { status: 'skipped' as const, reason: 'play-session-id-unavailable' };
           await runtime.client.reportPlaying(report.itemId, {
             PlaySessionId: report.playSessionId,
             PositionTicks: report.positionTicks
           });
+          return { status: 'sent' as const };
         },
         reportProgress: async report => {
-          const runtime = runtimeRef.current;
-          if (!runtime || !report.playSessionId) return;
+          const runtime = reportingRuntimeByAttemptRef.current.get(report.attemptId);
+          if (!runtime) return { status: 'skipped' as const, reason: 'attempt-runtime-unavailable' };
+          if (runtime.itemId !== report.itemId) return { status: 'skipped' as const, reason: 'attempt-item-mismatch' };
+          if (!report.playSessionId) return { status: 'skipped' as const, reason: 'play-session-id-unavailable' };
           await runtime.client.reportProgress(report.itemId, {
             PlaySessionId: report.playSessionId,
             PositionTicks: report.positionTicks,
             IsPaused: report.isPaused
           });
+          return { status: 'sent' as const };
         },
         reportStopped: async report => {
-          const runtime = runtimeRef.current;
-          if (!runtime || !report.playSessionId) return;
-          await runtime.client.reportStopped(report.itemId, {
-            PlaySessionId: report.playSessionId,
-            PositionTicks: report.positionTicks
-          });
+          const runtime = reportingRuntimeByAttemptRef.current.get(report.attemptId);
+          try {
+            if (!runtime) return { status: 'skipped' as const, reason: 'attempt-runtime-unavailable' };
+            if (runtime.itemId !== report.itemId) return { status: 'skipped' as const, reason: 'attempt-item-mismatch' };
+            if (!report.playSessionId) return { status: 'skipped' as const, reason: 'play-session-id-unavailable' };
+            await runtime.client.reportStopped(report.itemId, {
+              PlaySessionId: report.playSessionId,
+              PositionTicks: report.positionTicks
+            });
+            return { status: 'sent' as const };
+          } finally {
+            reportingRuntimeByAttemptRef.current.delete(report.attemptId);
+          }
         }
       }
     );
   }
 
+  const clearHideControlsTimer = useCallback(() => {
+    if (hideControlsTimer.current !== null) {
+      window.clearTimeout(hideControlsTimer.current);
+      hideControlsTimer.current = null;
+    }
+  }, []);
+
   const showControls = useCallback(() => {
     setControlsVisible(true);
-    if (hideControlsTimer.current !== null) window.clearTimeout(hideControlsTimer.current);
+    clearHideControlsTimer();
     if (playerStateRef.current === 'playing') {
       hideControlsTimer.current = window.setTimeout(() => {
+        hideControlsTimer.current = null;
         services.focusManager.focus('playback-surface', {
           routeId: toRouteString(state.route),
           reason: 'direct'
@@ -175,7 +273,7 @@ export function PlaybackScreen() {
         setControlsVisible(false);
       }, 4_500);
     }
-  }, [services.focusManager, state.route]);
+  }, [clearHideControlsTimer, services.focusManager, state.route]);
 
   useEffect(() => {
     const onRemoteActivity = () => showControls();
@@ -184,8 +282,13 @@ export function PlaybackScreen() {
   }, [showControls]);
 
   useEffect(() => {
-    if (playerState === 'playing') showControls();
-  }, [playerState, showControls]);
+    if (playerState === 'playing') {
+      showControls();
+      return;
+    }
+    clearHideControlsTimer();
+    setControlsVisible(true);
+  }, [clearHideControlsTimer, playerState, showControls]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -201,8 +304,8 @@ export function PlaybackScreen() {
     });
   }, [services.focusManager, showControls, state.route]);
 
-  useEffect(() => services.playback.registerStopOwner(() => (
-    engineRef.current?.stop('user')
+  useEffect(() => services.playback.registerStopOwner(reason => (
+    engineRef.current?.stop(reason)
   )), [services.playback]);
 
   useEffect(() => {
@@ -219,15 +322,20 @@ export function PlaybackScreen() {
         : 0
     }).catch(cause => {
       if (engine.getActiveAttemptId()) {
-        setError(cause instanceof Error ? cause.message : 'Playback failed');
+        const message = cause instanceof Error
+          ? cause.message
+          : cause && typeof cause === 'object' && 'message' in cause && typeof cause.message === 'string'
+            ? cause.message
+            : 'Playback failed';
+        setError(redactSensitiveText(message));
       }
     });
 
     return () => {
-      if (hideControlsTimer.current !== null) window.clearTimeout(hideControlsTimer.current);
+      clearHideControlsTimer();
       engine.detach();
     };
-  }, [intent, userSession]);
+  }, [clearHideControlsTimer, intent, userSession]);
 
   const closePlayback = () => {
     const engine = engineRef.current;
@@ -263,17 +371,26 @@ export function PlaybackScreen() {
           focusId="playback-toggle"
           onClick={() => {
             showControls();
+            if (playerStateRef.current === 'ended' || playerStateRef.current === 'error') return;
             if (snapshot.paused) void engineRef.current?.play();
             else engineRef.current?.pause();
           }}
-          disabled={loading || Boolean(error)}
+          disabled={loading || playerState === 'ended' || Boolean(error)}
         >
-          {snapshot.paused ? 'Play' : 'Pause'}
+          {playerState === 'ended' ? 'Ended' : snapshot.paused ? 'Play' : 'Pause'}
         </FocusableButton>
-        <FocusableButton focusId="playback-rewind" onClick={() => engineRef.current?.seek(snapshot.currentTime - 30)} disabled={!snapshot.canSeek}>
+        <FocusableButton
+          focusId="playback-rewind"
+          onClick={() => engineRef.current?.seek(snapshot.currentTime - 30)}
+          disabled={!snapshot.canSeek || playerState === 'ended' || Boolean(error)}
+        >
           −30s
         </FocusableButton>
-        <FocusableButton focusId="playback-forward" onClick={() => engineRef.current?.seek(snapshot.currentTime + 30)} disabled={!snapshot.canSeek}>
+        <FocusableButton
+          focusId="playback-forward"
+          onClick={() => engineRef.current?.seek(snapshot.currentTime + 30)}
+          disabled={!snapshot.canSeek || playerState === 'ended' || Boolean(error)}
+        >
           +30s
         </FocusableButton>
         <div className="ptv-playback__progress" aria-hidden="true">

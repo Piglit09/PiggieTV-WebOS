@@ -6,6 +6,8 @@
 - `Users/AuthenticateByName`
 - `Users/AuthenticateWithQuickConnect`
 - `QuickConnect/Initiate`
+- `QuickConnect/Connect`
+- `Users/Me`
 - `Users/{userId}`
 - `Users/{userId}/Views`
 - `Users/{userId}/Items`
@@ -24,8 +26,9 @@
 ## Session handling
 
 - Server URL validation occurs during startup and server screen flow.
-- Server identity is read from `System/Info/Public`.
-- Session is restored by stored `serverId` + `userId`, then verified via `Users/{userId}`.
+- Server identity is read from `System/Info/Public`. Jellyfin 10.11 uses `Id`, while older
+  responses can use `ServerId`; the client accepts either and normalizes it to `ServerId`.
+- Session is restored from the canonical saved session, then verified via `Users/Me`.
 - Session tokens are only sent in request headers.
 
 ## Playback info

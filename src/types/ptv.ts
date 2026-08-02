@@ -150,6 +150,7 @@ export interface PtvError {
 
 export interface PtvDiagnosticsSnapshot {
   appVersion: string;
+  packageId: string;
   buildTimestamp: string;
   commitHash?: string | null;
   mode: 'development' | 'production';
@@ -157,6 +158,8 @@ export interface PtvDiagnosticsSnapshot {
   tvModel?: string | null;
   viewport: string;
   dpr: number;
+  userAgent: string;
+  visibilityState: string;
   serverVersion?: string | null;
   serverUrl: string;
   userId: string;
@@ -164,6 +167,7 @@ export interface PtvDiagnosticsSnapshot {
   pluginApiVersion?: string | null;
   capabilities: string[];
   currentRoute: string;
+  previousRoute: string | null;
   currentFocusId: string | null;
   previousFocusId: string | null;
   activeRequests: number;
@@ -200,7 +204,24 @@ export interface PtvDiagnosticsSnapshot {
   lastPlaybackError?: string | null;
   lastUiError?: string | null;
   authentication?: Record<string, unknown> | null;
+  currentSession?: {
+    envelopeSchemaVersion: number | null;
+    sessionSchemaVersion: number | null;
+    sessionPresent: boolean;
+    inMemorySessionPresent: boolean;
+    tokenPresent: boolean;
+    serverOrigin: string | null;
+    userIdSuffix: string;
+  } | null;
+  sessionRestore?: Record<string, unknown> | null;
+  recentSessionRestoreEvents?: Array<Record<string, unknown>>;
   playbackDetails?: Record<string, unknown> | null;
+  lastInputEvent?: Record<string, unknown> | null;
+  recentInputEvents?: Array<Record<string, unknown>>;
+  lastNavigationEvent?: Record<string, unknown> | null;
+  recentNavigationEvents?: Array<Record<string, unknown>>;
+  recentLifecycleEvents?: Array<Record<string, unknown>>;
+  lastRouteFocusRestore?: Record<string, unknown> | null;
   recentFocusTransitions?: Array<Record<string, unknown>>;
 }
 

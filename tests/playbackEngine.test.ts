@@ -19,6 +19,7 @@ class FakeVideoElement extends EventTarget {
   public ended = false;
   public error: MediaError | null = null;
   public ranges: Array<{ start: number; end: number }> = [];
+  public bufferedRangeData: Array<{ start: number; end: number }> = [];
   public playImplementation: () => Promise<void> = async () => {
     this.paused = false;
     this.dispatchEvent(new Event('playing'));
@@ -54,7 +55,14 @@ class FakeVideoElement extends EventTarget {
   }
 
   public get seekable(): TimeRanges {
-    const ranges = this.ranges;
+    return this.toTimeRanges(this.ranges);
+  }
+
+  public get buffered(): TimeRanges {
+    return this.toTimeRanges(this.bufferedRangeData);
+  }
+
+  private toTimeRanges(ranges: Array<{ start: number; end: number }>): TimeRanges {
     return {
       length: ranges.length,
       start(index: number) {
@@ -87,7 +95,14 @@ function resolvedSource(url = 'https://piggietv.com/Videos/item/stream?api_key=s
     mode: 'direct-play',
     container: 'mp4',
     videoCodec: 'h264',
-    audioCodec: 'aac'
+    audioCodec: 'aac',
+    sourceContainer: 'mp4',
+    sourceVideoCodec: 'h264',
+    sourceAudioCodec: 'aac',
+    requestedOutputProtocol: 'http',
+    requestedOutputContainer: 'mp4',
+    requestedOutputVideoCodec: 'h264',
+    requestedOutputAudioCodec: 'aac'
   };
 }
 
@@ -101,6 +116,7 @@ describe('PlaybackEngine authoritative lifecycle', () => {
     const video = new FakeVideoElement();
     video.duration = 120;
     video.ranges = [{ start: 0, end: 120 }];
+    video.bufferedRangeData = [{ start: 0, end: 24.5 }];
     const addListener = vi.spyOn(video, 'addEventListener');
     const reportPlaying = vi.fn(async () => undefined);
     const engine = new PlaybackEngine(undefined, {}, {
@@ -132,20 +148,63 @@ describe('PlaybackEngine authoritative lifecycle', () => {
 
     const diagnostics = engine.getDiagnosticsSnapshot();
     expect(diagnostics).toMatchObject({
+      activeAttemptId: result.attemptId,
       itemIdSuffix: '123456',
       mediaSourceIdSuffix: 'abcdef',
       decision: 'direct-play',
       finalUrlOrigin: 'https://piggietv.com',
       finalUrlPathCategory: 'direct-play',
+      sourceContainer: 'mp4',
+      sourceVideoCodec: 'h264',
+      sourceAudioCodec: 'aac',
+      requestedOutputProtocol: 'http',
+      requestedOutputContainer: 'mp4',
+      requestedOutputVideoCodec: 'h264',
+      requestedOutputAudioCodec: 'aac',
+      selectedOutputProtocol: 'http',
+      selectedOutputContainer: 'mp4',
+      selectedOutputVideoCodec: 'h264',
+      selectedOutputAudioCodec: 'aac',
+      selectedOutputEvidence: 'direct-source-and-stream-url',
       sourceAssignments: 1,
       loadCalls: 1,
       playCalls: 1,
       duration: 120,
-      canSeek: true
+      canSeek: true,
+      bufferedRanges: {
+        count: 1,
+        ranges: [{ start: 0, end: 24.5 }],
+        totalSeconds: 24.5,
+        truncated: false
+      },
+      seekableRanges: {
+        count: 1,
+        ranges: [{ start: 0, end: 120 }],
+        totalSeconds: 120,
+        truncated: false
+      },
+      sourcePresent: true,
+      progressReportingActive: false,
+      lastPlayPromiseResult: 'fulfilled'
+    });
+    expect(diagnostics.mediaEventHistory.map(entry => entry.event)).toEqual(expect.arrayContaining(['canplay', 'playing']));
+    expect(diagnostics.mediaEventHistory.every(entry => Number.isFinite(entry.timestamp))).toBe(true);
+    expect(diagnostics.reportEvidence).toMatchObject({
+      queued: { playing: 1 },
+      attempted: { playing: 1 },
+      succeeded: { playing: 1 },
+      failed: { playing: 0 },
+      skipped: { playing: 0 }
     });
     expect(JSON.stringify(diagnostics)).not.toContain('secret');
 
     engine.dispose();
+    expect(engine.getDiagnosticsSnapshot()).toMatchObject({
+      activeAttemptId: null,
+      sourcePresent: false,
+      lastStopReason: 'disposed',
+      loadCalls: 2
+    });
   });
 
   it('supersedes an unresolved attempt and prevents its stale source from winning', async () => {
@@ -213,7 +272,14 @@ describe('PlaybackEngine authoritative lifecycle', () => {
 
     expect(result.status).toBe('cancelled');
     expect(onError).not.toHaveBeenCalled();
-    expect(engine.getDiagnosticsSnapshot().lastPlayerError).toBeNull();
+    expect(engine.getDiagnosticsSnapshot()).toMatchObject({
+      activeAttemptId: null,
+      sourcePresent: false,
+      lastStopReason: 'back',
+      lastPlayPromiseResult: 'cancelled',
+      lastPlayPromiseError: null,
+      lastPlayerError: null
+    });
     expect(engine.getState()).toBe('idle');
   });
 
@@ -226,12 +292,19 @@ describe('PlaybackEngine authoritative lifecycle', () => {
     const addListener = vi.spyOn(video, 'addEventListener');
     const removeListener = vi.spyOn(video, 'removeEventListener');
     const reportStopped = vi.fn(async () => undefined);
+    const reportProgress = vi.fn(async () => undefined);
+    const setInterval = vi.fn(() => 17);
+    const clearInterval = vi.fn();
     const engine = new PlaybackEngine(undefined, {}, {
       resolveSource: vi.fn(async () => resolvedSource()),
-      reportStopped
+      reportProgress,
+      reportStopped,
+      setInterval,
+      clearInterval
     });
     engine.attach(asVideo(video));
     await engine.start({ itemId: 'movie-stop' });
+    expect(engine.getDiagnosticsSnapshot().progressReportingActive).toBe(true);
 
     await engine.stop('back');
 
@@ -245,11 +318,23 @@ describe('PlaybackEngine authoritative lifecycle', () => {
       positionTicks: 420_000_000
     }));
     expect(removeListener).toHaveBeenCalledTimes(addListener.mock.calls.length);
+    expect(clearInterval).toHaveBeenCalledWith(17);
     expect(engine.getState()).toBe('idle');
     expect(engine.getDiagnosticsSnapshot()).toMatchObject({
+      activeAttemptId: null,
+      sourcePresent: false,
+      progressReportingActive: false,
+      lastStopReason: 'back',
       sourceAssignments: 1,
       loadCalls: 2,
       playCalls: 1,
+      stoppedReports: 1
+    });
+
+    engine.detach();
+    expect(engine.getDiagnosticsSnapshot()).toMatchObject({
+      lastStopReason: 'back',
+      loadCalls: 2,
       stoppedReports: 1
     });
   });
@@ -269,6 +354,282 @@ describe('PlaybackEngine authoritative lifecycle', () => {
     expect(engine.seek(Number.POSITIVE_INFINITY)).toBe(false);
     expect(engine.seek(500)).toBe(true);
     expect(video.currentTime).toBe(100);
+
+    engine.dispose();
+  });
+
+  it('ends the active attempt, stops progress reporting, and queues one stopped report', async () => {
+    const video = new FakeVideoElement();
+    video.readyState = 3;
+    video.duration = 60;
+    video.ranges = [{ start: 0, end: 60 }];
+    const reportStopped = vi.fn(async () => undefined);
+    const setInterval = vi.fn(() => 29);
+    const clearInterval = vi.fn();
+    const engine = new PlaybackEngine(undefined, {}, {
+      resolveSource: vi.fn(async () => resolvedSource()),
+      reportProgress: vi.fn(async () => undefined),
+      reportStopped,
+      setInterval,
+      clearInterval
+    });
+    engine.attach(asVideo(video));
+    await engine.start({ itemId: 'movie-ended' });
+
+    video.currentTime = 60;
+    video.ended = true;
+    video.dispatchEvent(new Event('ended'));
+    await flushPromises();
+
+    expect(clearInterval).toHaveBeenCalledWith(29);
+    expect(reportStopped).toHaveBeenCalledTimes(1);
+    expect(reportStopped).toHaveBeenCalledWith(expect.objectContaining({ reason: 'ended', ended: true }));
+    expect(engine.getDiagnosticsSnapshot()).toMatchObject({
+      state: 'ended',
+      activeAttemptId: null,
+      sourcePresent: true,
+      progressReportingActive: false,
+      lastStopReason: 'ended',
+      stoppedReports: 1
+    });
+
+    const playCallsAtEnd = video.play.mock.calls.length;
+    await engine.play();
+    video.dispatchEvent(new Event('playing'));
+    video.dispatchEvent(new Event('pause'));
+    expect(video.play).toHaveBeenCalledTimes(playCallsAtEnd);
+    expect(engine.getDiagnosticsSnapshot()).toMatchObject({
+      state: 'ended',
+      activeAttemptId: null,
+      progressReportingActive: false,
+      stoppedReports: 1
+    });
+
+    engine.dispose();
+  });
+
+  it('reports finite ranges, throttles timeupdate churn, and preserves critical media evidence', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    const video = new FakeVideoElement();
+    video.duration = 120;
+    video.ranges = [
+      { start: 0, end: 60 },
+      { start: Number.NaN, end: 80 },
+      { start: 90, end: Number.POSITIVE_INFINITY },
+      { start: 100, end: 95 }
+    ];
+    video.bufferedRangeData = [
+      { start: 0, end: 20 },
+      { start: 30, end: 45 }
+    ];
+    const engine = new PlaybackEngine();
+    engine.attach(asVideo(video));
+    video.dispatchEvent(new Event('loadedmetadata'));
+
+    for (let index = 0; index < 100; index += 1) {
+      video.currentTime = index;
+      video.dispatchEvent(new Event('timeupdate'));
+      vi.advanceTimersByTime(1_000);
+    }
+
+    const snapshot = engine.getDiagnosticsSnapshot();
+    expect(snapshot.seekableRanges).toEqual({
+      count: 1,
+      ranges: [{ start: 0, end: 60 }],
+      totalSeconds: 60,
+      truncated: false
+    });
+    expect(snapshot.bufferedRanges).toEqual({
+      count: 2,
+      ranges: [{ start: 0, end: 20 }, { start: 30, end: 45 }],
+      totalSeconds: 35,
+      truncated: false
+    });
+    expect(snapshot.mediaEventHistory).toHaveLength(80);
+    expect(snapshot.mediaEventHistoryTruncated).toBe(true);
+    expect(snapshot.mediaEventHistory.some(entry => entry.event === 'loadedmetadata')).toBe(true);
+    expect(snapshot.mediaEventCounts).toMatchObject({ loadedmetadata: 1, timeupdate: 100 });
+    expect(snapshot.mediaEventHistory.every(entry => (
+      Number.isFinite(entry.timestamp) &&
+      Number.isFinite(entry.readyState) &&
+      Number.isFinite(entry.networkState) &&
+      Number.isFinite(entry.currentTime)
+    ))).toBe(true);
+    expect(JSON.stringify(snapshot)).not.toMatch(/NaN|Infinity/);
+
+    engine.dispose();
+    vi.useRealTimers();
+  });
+
+  it('records skipped and failed report outcomes without claiming successful Jellyfin reports', async () => {
+    const video = new FakeVideoElement();
+    video.readyState = 3;
+    const reportPlaying = vi.fn(async () => ({
+      status: 'skipped' as const,
+      reason: 'play-session-id-unavailable'
+    }));
+    const engine = new PlaybackEngine(undefined, {}, {
+      resolveSource: vi.fn(async () => ({ ...resolvedSource(), playSessionId: null })),
+      reportPlaying,
+      reportProgress: vi.fn(async () => ({ status: 'sent' as const }))
+    });
+    engine.attach(asVideo(video));
+    await engine.start({ itemId: 'movie-no-session' });
+    await flushPromises();
+
+    expect(engine.getDiagnosticsSnapshot()).toMatchObject({
+      playingReports: 0,
+      progressReportingActive: false,
+      reportEvidence: {
+        queued: { playing: 1, progress: 0 },
+        attempted: { playing: 1, progress: 0 },
+        succeeded: { playing: 0, progress: 0 },
+        failed: { playing: 0, progress: 0 },
+        skipped: { playing: 1, progress: 0 },
+        last: { kind: 'playing', status: 'skipped', reason: 'play-session-id-unavailable' }
+      }
+    });
+    engine.dispose();
+
+    const failedVideo = new FakeVideoElement();
+    failedVideo.readyState = 3;
+    const failedEngine = new PlaybackEngine(undefined, {}, {
+      resolveSource: vi.fn(async () => resolvedSource()),
+      reportPlaying: vi.fn(async () => {
+        throw new Error('Report failed at https://piggietv.com?api_key=report-secret');
+      })
+    });
+    failedEngine.attach(asVideo(failedVideo));
+    await failedEngine.start({ itemId: 'movie-report-failure' });
+    await flushPromises();
+
+    const failedSnapshot = failedEngine.getDiagnosticsSnapshot();
+    expect(failedSnapshot).toMatchObject({
+      playingReports: 0,
+      reportEvidence: {
+        queued: { playing: 1 },
+        attempted: { playing: 1 },
+        succeeded: { playing: 0 },
+        failed: { playing: 1 },
+        skipped: { playing: 0 },
+        last: { kind: 'playing', status: 'failed' }
+      }
+    });
+    expect(failedSnapshot.reportEvidence.last?.reason).toContain('***redacted***');
+    expect(JSON.stringify(failedSnapshot)).not.toContain('report-secret');
+    failedEngine.dispose();
+  });
+
+  it('separates source codecs from requested and server-selected transcode output', async () => {
+    const video = new FakeVideoElement();
+    video.readyState = 3;
+    const engine = new PlaybackEngine(undefined, {}, {
+      resolveSource: vi.fn(async () => ({
+        url: 'https://piggietv.com/Videos/item/master.m3u8?VideoCodec=h264&AudioCodec=aac&SegmentContainer=ts&api_key=secret',
+        playSessionId: 'transcode-session',
+        mediaSourceId: 'source-hevc',
+        mode: 'transcode' as const,
+        sourceContainer: 'mkv',
+        sourceVideoCodec: 'hevc',
+        sourceAudioCodec: 'eac3',
+        requestedOutputProtocol: 'hls',
+        requestedOutputContainer: 'ts',
+        requestedOutputVideoCodec: 'h264',
+        requestedOutputAudioCodec: 'aac'
+      }))
+    });
+    engine.attach(asVideo(video));
+    await engine.start({ itemId: 'movie-transcode' });
+
+    expect(engine.getDiagnosticsSnapshot()).toMatchObject({
+      decision: 'transcode',
+      sourceContainer: 'mkv',
+      sourceVideoCodec: 'hevc',
+      sourceAudioCodec: 'eac3',
+      requestedOutputProtocol: 'hls',
+      requestedOutputContainer: 'ts',
+      requestedOutputVideoCodec: 'h264',
+      requestedOutputAudioCodec: 'aac',
+      selectedOutputProtocol: 'hls',
+      selectedOutputContainer: 'ts',
+      selectedOutputVideoCodec: 'h264',
+      selectedOutputAudioCodec: 'aac',
+      selectedOutputEvidence: 'server-selected-stream-url'
+    });
+    expect(JSON.stringify(engine.getDiagnosticsSnapshot())).not.toContain('secret');
+    engine.dispose();
+  });
+
+  it('records a rejected play promise without exposing a token-bearing URL', async () => {
+    const video = new FakeVideoElement();
+    video.readyState = 3;
+    video.duration = 60;
+    video.ranges = [{ start: 0, end: 60 }];
+    video.playImplementation = async () => {
+      throw new Error('Play denied at https://piggietv.com/stream?api_key=play-secret');
+    };
+    const engine = new PlaybackEngine(undefined, {}, {
+      resolveSource: vi.fn(async () => resolvedSource())
+    });
+    engine.attach(asVideo(video));
+
+    await expect(engine.start({ itemId: 'movie-rejected' })).rejects.toThrow('Play denied');
+
+    const snapshot = engine.getDiagnosticsSnapshot();
+    expect(snapshot).toMatchObject({
+      state: 'error',
+      lastPlayPromiseResult: 'rejected'
+    });
+    expect(snapshot.lastPlayPromiseError).toContain('***redacted***');
+    expect(JSON.stringify(snapshot)).not.toContain('play-secret');
+
+    engine.dispose();
+  });
+
+  it('captures numeric media errors and their redacted event evidence', async () => {
+    const video = new FakeVideoElement();
+    video.readyState = 3;
+    video.duration = 60;
+    video.ranges = [{ start: 0, end: 60 }];
+    const setInterval = vi.fn(() => 23);
+    const clearInterval = vi.fn();
+    const engine = new PlaybackEngine(undefined, {}, {
+      resolveSource: vi.fn(async () => resolvedSource()),
+      reportProgress: vi.fn(async () => undefined),
+      setInterval,
+      clearInterval
+    });
+    engine.attach(asVideo(video));
+
+    await engine.start({ itemId: 'movie-media-error' });
+    expect(engine.getDiagnosticsSnapshot().progressReportingActive).toBe(true);
+    video.error = {
+      code: 4,
+      message: 'Unsupported source https://piggietv.com/stream?token=media-secret'
+    } as unknown as MediaError;
+    video.dispatchEvent(new Event('error'));
+
+    const snapshot = engine.getDiagnosticsSnapshot();
+    expect(snapshot).toMatchObject({
+      state: 'error',
+      lastMediaEvent: 'error',
+      lastMediaErrorCode: 4,
+      lastPlayPromiseResult: 'fulfilled',
+      progressReportingActive: false
+    });
+    expect(clearInterval).toHaveBeenCalledWith(23);
+    expect(snapshot.lastMediaErrorMessage).toContain('***redacted***');
+    expect(snapshot.mediaEventHistory[snapshot.mediaEventHistory.length - 1]?.event).toBe('error');
+    expect(JSON.stringify(snapshot)).not.toContain('media-secret');
+
+    video.dispatchEvent(new Event('playing'));
+    video.dispatchEvent(new Event('pause'));
+    video.dispatchEvent(new Event('ended'));
+    expect(engine.getDiagnosticsSnapshot()).toMatchObject({
+      state: 'error',
+      progressReportingActive: false
+    });
 
     engine.dispose();
   });
