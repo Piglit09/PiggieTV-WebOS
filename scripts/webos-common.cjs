@@ -52,6 +52,9 @@ function readAppInfo(root = process.cwd()) {
   if (typeof appInfo.id !== 'string' || typeof appInfo.version !== 'string') {
     throw new Error('appinfo.json is missing a valid id or version.');
   }
+  if (appInfo.disableBackHistoryAPI !== true) {
+    throw new Error('appinfo.json must set disableBackHistoryAPI to true so webOS delivers Back events to the application.');
+  }
   return {
     ...appInfo,
     id: requireSafeCliValue(appInfo.id, 'Application ID'),

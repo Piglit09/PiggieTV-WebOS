@@ -256,6 +256,9 @@ export function DetailsScreen() {
     const intent: PtvPlaybackIntent = {
       kind: playbackKind(playable),
       itemId: playable.id,
+      seriesId: playable.type === 'Episode'
+        ? playable.seriesId ?? (item?.type === 'Series' ? item.id : undefined)
+        : undefined,
       serverId: state.userSession.serverId,
       userId: state.userSession.userId,
       title: playable.name,

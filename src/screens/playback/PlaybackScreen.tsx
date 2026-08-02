@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useApp } from '../../state/appContext';
 import { chooseBestPlaybackSource } from '../../playback/decision';
 import {
@@ -7,10 +7,12 @@ import {
   type PlaybackEngineState
 } from '../../playback/engine';
 import { JellyfinApiClient, resolvePlaybackStreamUrl } from '../../api/jellyfin/client';
+import { mapPtvItems } from '../../api/jellyfin/mappers';
 import { FocusableButton } from '../../components/FocusableButton';
 import { formatMediaDuration, formatMediaTime } from '../../utils/format';
-import { toRouteString } from '../../navigation/router';
+import { playbackRouteFromIntent, toRouteString } from '../../navigation/router';
 import { redactSensitiveText } from '../../core/redaction';
+import type { PtvItem, PtvPlaybackIntent } from '../../types/ptv';
 
 type PlaybackRuntime = {
   client: ReturnType<ReturnType<typeof useApp>['services']['jellyfin']['getClient']>;
@@ -88,6 +90,15 @@ const emptySnapshot: PlaybackDiagnosticsSnapshot = {
   }
 };
 
+function episodeContext(item: PtvItem) {
+  const number = item.parentIndexNumber && item.indexNumber
+    ? `S${item.parentIndexNumber} E${item.indexNumber}`
+    : item.indexNumber
+      ? `Episode ${item.indexNumber}`
+      : item.seasonName ?? null;
+  return [item.seriesName, number].filter(Boolean).join(' · ') || undefined;
+}
+
 export function PlaybackScreen() {
   const { state, dispatch, services } = useApp();
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -96,7 +107,11 @@ export function PlaybackScreen() {
   const engineRef = useRef<PlaybackEngine | null>(null);
   const hideControlsTimer = useRef<number | null>(null);
   const playerStateRef = useRef<PlaybackEngineState>('idle');
+  const autoAdvanceControllerRef = useRef<AbortController | null>(null);
+  const autoAdvanceStartedForItemRef = useRef<string | null>(null);
   const [playerState, setPlayerState] = useState<PlaybackEngineState>('idle');
+  const [endedItemId, setEndedItemId] = useState<string | null>(null);
+  const [autoAdvancePending, setAutoAdvancePending] = useState(false);
   const [snapshot, setSnapshot] = useState<PlaybackDiagnosticsSnapshot>(emptySnapshot);
   const [error, setError] = useState<string | null>(null);
   const [controlsVisible, setControlsVisible] = useState(true);
@@ -125,7 +140,14 @@ export function PlaybackScreen() {
       services.diagnostics,
       {
         onPlayState: next => {
-          if (next !== 'stopped') setPlayerState(next);
+          if (next !== 'stopped') {
+            if (next !== 'ended') {
+              autoAdvanceControllerRef.current?.abort('playback-state-changed');
+              autoAdvanceControllerRef.current = null;
+            }
+            setPlayerState(next);
+            setEndedItemId(next === 'ended' ? runtimeRef.current?.itemId ?? null : null);
+          }
         },
         onError: message => setError(message),
         onDiagnostics: next => {
@@ -313,6 +335,7 @@ export function PlaybackScreen() {
     const video = videoRef.current;
     if (!engine || !video || !intent || !userSession) return;
     setError(null);
+    setAutoAdvancePending(false);
     setControlsVisible(true);
     engine.attach(video);
     void engine.start({
@@ -336,6 +359,107 @@ export function PlaybackScreen() {
       engine.detach();
     };
   }, [clearHideControlsTimer, intent, userSession]);
+
+  useLayoutEffect(() => {
+    const engine = engineRef.current;
+    const seriesId = intent?.seriesId?.trim();
+    if (
+      !engine ||
+      !intent ||
+      intent.kind !== 'episode' ||
+      !seriesId ||
+      !userSession ||
+      !state.settings.autoPlayNext ||
+      state.route.screen !== 'playback' ||
+      endedItemId !== intent.itemId ||
+      autoAdvanceStartedForItemRef.current === intent.itemId
+    ) return;
+
+    const completedItemId = intent.itemId;
+    autoAdvanceStartedForItemRef.current = completedItemId;
+    const controller = new AbortController();
+    autoAdvanceControllerRef.current?.abort('auto-advance-replaced');
+    autoAdvanceControllerRef.current = controller;
+    let active = true;
+    setAutoAdvancePending(true);
+
+    void (async () => {
+      try {
+        await engine.whenReportsSettled();
+        if (
+          !active ||
+          controller.signal.aborted ||
+          engine.getState() !== 'ended' ||
+          runtimeRef.current?.itemId !== completedItemId
+        ) return;
+
+        const runtime = runtimeRef.current;
+        const response = await runtime.client.getNextUpForSeries(
+          runtime.userId,
+          seriesId,
+          2,
+          controller.signal
+        );
+        if (
+          !active ||
+          controller.signal.aborted ||
+          engine.getState() !== 'ended' ||
+          runtimeRef.current?.itemId !== completedItemId
+        ) return;
+
+        const nextEpisode = mapPtvItems(response).find(candidate => (
+          candidate.type === 'Episode' &&
+          candidate.id !== completedItemId &&
+          candidate.seriesId === seriesId
+        ));
+        if (!nextEpisode) return;
+
+        const nextIntent: PtvPlaybackIntent = {
+          kind: 'episode',
+          itemId: nextEpisode.id,
+          seriesId: nextEpisode.seriesId ?? seriesId,
+          serverId: intent.serverId,
+          userId: intent.userId,
+          title: nextEpisode.name,
+          context: episodeContext(nextEpisode),
+          startPositionTicks: nextEpisode.playbackPositionTicks
+        };
+        setAutoAdvancePending(false);
+        dispatch({
+          type: 'advance_playback',
+          playbackIntent: nextIntent,
+          route: playbackRouteFromIntent(nextIntent)
+        });
+      } catch (cause) {
+        if (!active || controller.signal.aborted) return;
+        const message = cause instanceof Error ? cause.message : String(cause);
+        services.diagnostics.logWarn('Auto-play next lookup failed', {
+          error: redactSensitiveText(message)
+        });
+      } finally {
+        if (autoAdvanceControllerRef.current === controller) {
+          autoAdvanceControllerRef.current = null;
+        }
+        if (active) setAutoAdvancePending(false);
+      }
+    })();
+
+    return () => {
+      active = false;
+      controller.abort('playback-route-changed');
+      if (autoAdvanceControllerRef.current === controller) {
+        autoAdvanceControllerRef.current = null;
+      }
+    };
+  }, [
+    dispatch,
+    endedItemId,
+    intent,
+    services.diagnostics,
+    state.route.screen,
+    state.settings.autoPlayNext,
+    userSession
+  ]);
 
   const closePlayback = () => {
     const engine = engineRef.current;
@@ -367,6 +491,7 @@ export function PlaybackScreen() {
     <section className="ptv-playback-route" onMouseMove={showControls} onClick={showControls}>
       <video ref={videoRef} playsInline />
       {loading && !error ? <div className="ptv-playback__status">Preparing video…</div> : null}
+      {autoAdvancePending && !error ? <div className="ptv-playback__status">Loading next episode…</div> : null}
       {error ? <div className="ptv-playback__error">{error}</div> : null}
       <div className={`ptv-playback__overlay ${controlsVisible ? '' : 'is-hidden'}`} aria-hidden={!controlsVisible}>
         <div className="ptv-playback__heading">
@@ -384,7 +509,7 @@ export function PlaybackScreen() {
             }}
             disabled={loading || playerState === 'ended' || Boolean(error)}
           >
-            {playerState === 'ended' ? 'Ended' : snapshot.paused ? 'Play' : 'Pause'}
+            {autoAdvancePending ? 'Next episode…' : playerState === 'ended' ? 'Ended' : snapshot.paused ? 'Play' : 'Pause'}
           </FocusableButton>
           <FocusableButton
             focusId="playback-rewind"

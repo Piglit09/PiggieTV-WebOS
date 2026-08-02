@@ -83,6 +83,7 @@ export interface PtvNavigationIntent {
 export interface PtvPlaybackIntent {
   kind: 'movie' | 'episode' | 'audio' | 'book';
   itemId: string;
+  seriesId?: string;
   serverId: string;
   userId: string;
   title?: string;

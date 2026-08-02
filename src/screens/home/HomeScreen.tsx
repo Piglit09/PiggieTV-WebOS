@@ -407,6 +407,7 @@ export function HomeScreen() {
     const intent: PtvPlaybackIntent = {
       kind: item.type === 'Episode' ? 'episode' : 'movie',
       itemId: item.id,
+      seriesId: item.type === 'Episode' ? item.seriesId : undefined,
       serverId: state.userSession.serverId,
       userId: state.userSession.userId,
       title: item.name,

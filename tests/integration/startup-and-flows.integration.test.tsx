@@ -24,6 +24,7 @@ const mockGetQuickConnectState = vi.fn();
 const mockDiscoverCapabilities = vi.fn();
 const mockGetResume = vi.fn();
 const mockGetNextUp = vi.fn();
+const mockGetNextUpForSeries = vi.fn();
 const mockGetRecentlyAdded = vi.fn();
 const mockGetItems = vi.fn();
 const mockGetItem = vi.fn();
@@ -57,6 +58,7 @@ vi.mock('../../src/api/jellyfin/client', () => ({
       discoverCapabilities: (...args: unknown[]) => mockDiscoverCapabilities(...args),
       getResume: (...args: unknown[]) => mockGetResume(...args),
       getNextUp: (...args: unknown[]) => mockGetNextUp(...args),
+      getNextUpForSeries: (...args: unknown[]) => mockGetNextUpForSeries(...args),
       getRecentlyAdded: (...args: unknown[]) => mockGetRecentlyAdded(...args),
       getItems: (...args: unknown[]) => mockGetItems(...args),
       getItem: (...args: unknown[]) => mockGetItem(...args),
@@ -148,6 +150,7 @@ beforeEach(() => {
     mockDiscoverCapabilities,
     mockGetResume,
     mockGetNextUp,
+    mockGetNextUpForSeries,
     mockGetRecentlyAdded,
     mockGetItems,
     mockGetItem,
@@ -187,6 +190,7 @@ beforeEach(() => {
   mockDiscoverCapabilities.mockResolvedValue([]);
   mockGetResume.mockResolvedValue({ Items: [] });
   mockGetNextUp.mockResolvedValue({ Items: [] });
+  mockGetNextUpForSeries.mockResolvedValue({ Items: [] });
   mockGetRecentlyAdded.mockResolvedValue({ Items: [] });
   mockGetItems.mockResolvedValue({ Items: [] });
   mockGetItem.mockResolvedValue({ Id: 'movie-1', Name: 'Featured Movie', Type: 'Movie', Overview: 'Overview' });
@@ -573,6 +577,24 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
     await waitFor(() => expect(mockGetPlaybackInfo).toHaveBeenCalledTimes(1));
     expect(mockGetPlaybackInfo.mock.calls[0]?.[1]).toBe('episode-10');
     expect(document.querySelectorAll('video')).toHaveLength(1);
+
+    const video = document.querySelector('video') as HTMLVideoElement;
+    Object.defineProperties(video, {
+      readyState: { configurable: true, value: 2 },
+      duration: { configurable: true, value: 270 },
+      currentTime: { configurable: true, writable: true, value: 270 },
+      ended: { configurable: true, value: true }
+    });
+    fireEvent.loadedData(video);
+    await waitFor(() => expect(mockReportPlaying).toHaveBeenCalledTimes(1));
+    fireEvent.ended(video);
+    await waitFor(() => expect(mockGetNextUpForSeries).toHaveBeenCalledTimes(1));
+    expect(mockGetNextUpForSeries).toHaveBeenCalledWith(
+      'user-1',
+      'series-1',
+      2,
+      expect.any(AbortSignal)
+    );
 
     fireEvent.keyDown(window, { key: 'GoBack', keyCode: 461, which: 461 });
     const restoredEpisode = await screen.findByRole('button', { name: /^Second Season Finale,/ });

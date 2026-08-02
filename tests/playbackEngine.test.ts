@@ -495,6 +495,54 @@ describe('PlaybackEngine authoritative lifecycle', () => {
     engine.dispose();
   });
 
+  it('waits for the deferred stopped report queued after ended', async () => {
+    const video = new FakeVideoElement();
+    video.readyState = 3;
+    video.duration = 60;
+    video.ranges = [{ start: 0, end: 60 }];
+    let resolveStopped!: () => void;
+    const stoppedReport = new Promise<void>(resolve => {
+      resolveStopped = resolve;
+    });
+    const reportStopped = vi.fn(() => stoppedReport);
+    const engine = new PlaybackEngine(undefined, {}, {
+      resolveSource: vi.fn(async () => resolvedSource()),
+      reportStopped
+    });
+    engine.attach(asVideo(video));
+    await engine.start({ itemId: 'episode-ended' });
+
+    video.currentTime = 60;
+    video.ended = true;
+    video.dispatchEvent(new Event('ended'));
+
+    const barrier = engine.whenReportsSettled();
+    let settled = false;
+    void barrier.then(() => {
+      settled = true;
+    });
+    await flushPromises();
+
+    expect(engine.whenReportsSettled()).toBe(barrier);
+    expect(reportStopped).toHaveBeenCalledTimes(1);
+    expect(reportStopped).toHaveBeenCalledWith(expect.objectContaining({ reason: 'ended', ended: true }));
+    expect(settled).toBe(false);
+    expect(engine.getDiagnosticsSnapshot().reportEvidence.queued.stopped).toBe(1);
+
+    resolveStopped();
+    await barrier;
+
+    expect(settled).toBe(true);
+    expect(engine.getDiagnosticsSnapshot()).toMatchObject({
+      stoppedReports: 1,
+      reportEvidence: {
+        succeeded: { stopped: 1 }
+      }
+    });
+
+    engine.dispose();
+  });
+
   it('reports finite ranges, throttles timeupdate churn, and preserves critical media evidence', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));

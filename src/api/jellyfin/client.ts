@@ -284,6 +284,23 @@ export class JellyfinApiClient {
     );
   }
 
+  public getNextUpForSeries(userId: string, seriesId: string, limit = 2, signal?: AbortSignal) {
+    return this.get<{ Items: Array<Record<string, unknown>>; TotalRecordCount?: number }>(
+      'Shows/NextUp',
+      {
+        UserId: userId,
+        SeriesId: seriesId,
+        Limit: limit,
+        Fields: 'ImageTags,BackdropImageTags,Overview,RunTimeTicks,SeriesName,SeasonName,IndexNumber,ParentIndexNumber,UserData',
+        EnableUserData: true,
+        EnableTotalRecordCount: false
+      },
+      undefined,
+      signal,
+      { requestRoute: 'GET Shows/NextUp' }
+    );
+  }
+
   public getSeasons(sessionUserId: string, seriesId: string, signal?: AbortSignal) {
     return this.get<{ Items: Array<Record<string, unknown>>; TotalRecordCount?: number }>(
       `Shows/${encodeURIComponent(seriesId)}/Seasons`,

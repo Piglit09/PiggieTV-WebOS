@@ -56,6 +56,7 @@ export type AppAction =
   | { type: 'set_libraries'; libraries: PtvLibrary[] }
   | { type: 'set_recent_servers'; recentServers: string[] }
   | { type: 'set_playback_intent'; playbackIntent: PtvPlaybackIntent | null }
+  | { type: 'advance_playback'; playbackIntent: PtvPlaybackIntent; route: PtvRoute }
   | { type: 'update_settings'; settings: Partial<AppSettings> }
   | { type: 'logout' };
 
@@ -205,6 +206,13 @@ function appReducer(state: AppState, action: AppAction): AppState {
 
     case 'set_playback_intent':
       return { ...state, playbackIntent: action.playbackIntent };
+
+    case 'advance_playback':
+      return {
+        ...state,
+        playbackIntent: action.playbackIntent,
+        route: action.route
+      };
 
     case 'update_settings':
       return { ...state, settings: { ...state.settings, ...action.settings } };

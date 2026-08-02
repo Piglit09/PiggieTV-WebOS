@@ -116,6 +116,46 @@ describe('JellyfinApiClient server identity compatibility', () => {
     });
   });
 
+  it('uses a Series-scoped next-up query and an identifier-free diagnostic route', async () => {
+    requestJson.mockResolvedValue({ Items: [] });
+    const controller = new AbortController();
+
+    await createClient().getNextUpForSeries(
+      'private-user-id',
+      'private-series-id',
+      3,
+      controller.signal
+    );
+
+    const [url, requestConfig] = requestJson.mock.calls[0] ?? [];
+    const config = requestConfig as {
+      method?: string;
+      query?: Record<string, unknown>;
+      requestRoute?: string;
+      signal?: AbortSignal;
+    };
+
+    expect(url).toBe('https://piggietv.com/Shows/NextUp');
+    expect(config).toMatchObject({
+      method: 'GET',
+      signal: controller.signal,
+      requestRoute: 'GET Shows/NextUp',
+      query: {
+        UserId: 'private-user-id',
+        SeriesId: 'private-series-id',
+        Limit: 3,
+        EnableUserData: true,
+        EnableTotalRecordCount: false
+      }
+    });
+    expect(config.query?.Fields).toEqual(expect.stringContaining('SeriesName'));
+    expect(config.query?.Fields).toEqual(expect.stringContaining('SeasonName'));
+    expect(config.query?.Fields).toEqual(expect.stringContaining('IndexNumber'));
+    expect(config.query?.Fields).toEqual(expect.stringContaining('ParentIndexNumber'));
+    expect(config.requestRoute).not.toContain('private-user-id');
+    expect(config.requestRoute).not.toContain('private-series-id');
+  });
+
   it('uses one bounded PlaybackInfo request with a sanitized diagnostic route', async () => {
     requestJson.mockResolvedValue({ MediaSources: [] });
 

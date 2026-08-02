@@ -671,6 +671,10 @@ export class PlaybackEngine {
     return this.activeAttempt?.id ?? null;
   }
 
+  public whenReportsSettled(): Promise<void> {
+    return this.reportChain;
+  }
+
   public getDiagnosticsSnapshot(): PlaybackDiagnosticsSnapshot {
     const media = this.media;
     const bufferedSourceLength = this.readMediaRangeLength('buffered');
