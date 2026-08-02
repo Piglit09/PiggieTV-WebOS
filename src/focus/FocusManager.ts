@@ -639,7 +639,8 @@ export class FocusManager {
   private isWaitingForAnotherNode(node: FocusNodeRegistration) {
     const pending = this.pendingRouteRestore;
     if (!pending || !this.nodeMatchesRoute(node, pending.routeId)) return false;
-    return Boolean(pending.targetId && pending.targetId !== node.id);
+    const requestedId = pending.targetId ?? pending.fallbackFocusId;
+    return Boolean(requestedId && requestedId !== node.id);
   }
 
   private pushHistory(id: string) {

@@ -52,8 +52,8 @@ export function LayoutShell({ children, title, onSettings, onBack, currentSectio
     <div className="ptv-shell">
       <header className="ptv-topbar" aria-label="PTV application navigation">
         <div className="ptv-brand" aria-label="PiggieTV">
-          <span className="ptv-brand__play" aria-hidden="true" />
-          <h1 aria-label="PiggieTV">PTV</h1>
+          <img className="ptv-brand__logo" src="icon-phase2.png" alt="" aria-hidden="true" draggable={false} />
+          <h1 aria-label="PiggieTV">PiggieTV</h1>
         </div>
 
         {authenticated ? (

@@ -1,5 +1,5 @@
 import React from 'react';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../../src/app/App';
 import {
@@ -748,6 +748,32 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
       expect(output).toContain('"sessionPresent": false');
       expect(output).toContain('"inMemorySessionPresent": false');
       expect(output).toContain('"tokenPresent": false');
+    });
+  });
+
+  it('records the initial Home load in diagnostics before any route return', async () => {
+    seedSession();
+    mockGetResume.mockResolvedValue({ Items: [{ Id: 'movie-1', Name: 'Featured Movie', Type: 'Movie' }] });
+    render(<App />);
+
+    await screen.findByRole('button', { name: 'Featured Movie' });
+    await waitFor(() => {
+      expect(mockGetResume).toHaveBeenCalledTimes(1);
+      expect(mockGetNextUp).toHaveBeenCalledTimes(1);
+      expect(mockGetRecentlyAdded).toHaveBeenCalledTimes(2);
+    });
+
+    await openDiagnostics();
+    const diagnosticTabs = screen.getByRole('navigation', { name: 'Diagnostic categories' });
+    fireEvent.click(within(diagnosticTabs).getByRole('button', { name: 'Home' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Raw JSON' }));
+
+    await waitFor(() => {
+      const output = document.querySelector('.ptv-diagnostics__output')?.textContent ?? '';
+      expect(output).toContain('"latestAttempt": {');
+      expect(output).toContain('"maxActiveRequests": 3');
+      expect(output).toContain('"status": "route-hidden"');
+      expect(output.match(/"outcome": "success"/g)).toHaveLength(8);
     });
   });
 

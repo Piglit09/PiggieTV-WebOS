@@ -217,6 +217,55 @@ describe('FocusManager', () => {
     expect(document.activeElement).toBe(play);
   });
 
+  it('keeps a pending route fallback ahead of unrelated same-route registrations', () => {
+    const manager = new FocusManager();
+    const shellHome = createFocusNode('shell-home', {
+      left: 0,
+      top: 0,
+      right: 120,
+      bottom: 60,
+      width: 120,
+      height: 60
+    });
+    const detailsPrimary = createFocusNode('details-primary', {
+      left: 0,
+      top: 100,
+      right: 180,
+      bottom: 180,
+      width: 180,
+      height: 80
+    });
+
+    manager.setActiveRoute('details:series-1', {
+      fallbackFocusId: 'details-primary',
+      focusFirstIfUnremembered: false
+    });
+    manager.register({
+      id: 'shell-home',
+      routeId: 'details:series-1',
+      ref: shellHome
+    });
+
+    expect(manager.focusId).toBeNull();
+    expect(document.activeElement).not.toBe(shellHome);
+
+    manager.register({
+      id: 'details-primary',
+      routeId: 'details:series-1',
+      ref: detailsPrimary
+    });
+
+    expect(manager.focusId).toBe('details-primary');
+    expect(document.activeElement).toBe(detailsPrimary);
+    expect(manager.lastTransition).toMatchObject({
+      routeId: 'details:series-1',
+      previousFocusId: null,
+      nextFocusId: 'details-primary',
+      reason: 'route-fallback',
+      fallbackUsed: true
+    });
+  });
+
   it('emits diagnostics metadata for directional input', () => {
     const manager = new FocusManager();
     const left = createFocusNode('left', { left: 0, top: 0, right: 100, bottom: 80, width: 100, height: 80 });

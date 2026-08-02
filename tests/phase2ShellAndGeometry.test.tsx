@@ -93,7 +93,8 @@ describe('Phase 2 authenticated shell contract', () => {
 
     const navigation = await screen.findByRole('navigation', { name: 'Primary' });
     expect(navigation).toBeTruthy();
-    expect(screen.getByRole('heading', { name: 'PiggieTV' }).textContent).toBe('PTV');
+    expect(screen.getByRole('heading', { name: 'PiggieTV' }).textContent).toBe('PiggieTV');
+    expect(document.querySelector('.ptv-brand__logo')?.getAttribute('src')).toBe('icon-phase2.png');
     expect(screen.queryByRole('button', { name: /diagnostics/i })).toBeNull();
 
     const home = screen.getByRole('button', { name: 'Home' });

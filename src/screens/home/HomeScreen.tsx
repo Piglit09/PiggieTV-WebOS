@@ -226,6 +226,7 @@ export function HomeScreen() {
     let activeRequests = 0;
     const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
     const elapsed = () => Math.max(0, (typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt);
+    services.diagnostics.synchronizeHomePerformanceSession(homeCacheKey);
     const attemptId = services.diagnostics.beginHomePerformanceAttempt();
     attemptIdRef.current = attemptId;
     imageFailuresRef.current = 0;
