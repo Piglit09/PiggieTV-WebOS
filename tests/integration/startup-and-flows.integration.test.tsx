@@ -204,6 +204,66 @@ describe('integration: startup and canonical session restore', () => {
     expect(screen.queryByRole('button', { name: /^sign in$/i })).toBeNull();
   });
 
+  it('loads Home rows through a three-request queue without starving library rows', async () => {
+    const resume = defer<{ Items: [] }>();
+    const nextUp = defer<{ Items: [] }>();
+    const movies = defer<{ Items: [] }>();
+    const shows = defer<{ Items: [] }>();
+    const recent = defer<{ Items: [] }>();
+    mockGetResume.mockReturnValueOnce(resume.promise);
+    mockGetNextUp.mockReturnValueOnce(nextUp.promise);
+    mockGetItems
+      .mockReturnValueOnce(movies.promise)
+      .mockReturnValueOnce(shows.promise);
+    mockGetRecentlyAdded.mockReturnValueOnce(recent.promise);
+    seedSession();
+    render(<App />);
+
+    await waitFor(() => {
+      expect(mockGetResume).toHaveBeenCalledTimes(1);
+      expect(mockGetNextUp).toHaveBeenCalledTimes(1);
+      expect(mockGetItems).toHaveBeenCalledTimes(1);
+    });
+    expect(mockGetRecentlyAdded).not.toHaveBeenCalled();
+    expect(mockGetItems.mock.calls[0]?.[1]).toMatchObject({
+      IncludeItemTypes: 'Movie',
+      Fields: 'ImageTags',
+      EnableUserData: false,
+      EnableTotalRecordCount: false
+    });
+
+    await act(async () => movies.resolve({ Items: [] }));
+    await waitFor(() => expect(mockGetItems).toHaveBeenCalledTimes(2));
+    expect(mockGetItems.mock.calls[1]?.[1]).toMatchObject({
+      IncludeItemTypes: 'Series',
+      Fields: 'ImageTags',
+      EnableUserData: false,
+      EnableTotalRecordCount: false
+    });
+    expect(mockGetRecentlyAdded).not.toHaveBeenCalled();
+
+    await act(async () => shows.resolve({ Items: [] }));
+    await waitFor(() => expect(mockGetRecentlyAdded).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      resume.resolve({ Items: [] });
+      nextUp.resolve({ Items: [] });
+      recent.resolve({ Items: [] });
+    });
+  });
+
+  it('redacts sensitive values from a server-supplied Home row error', async () => {
+    mockGetResume.mockRejectedValueOnce({
+      kind: 'http-server-error',
+      message: 'Failure at https://server.example.com/Items/private-item?api_key=home-row-secret'
+    });
+    seedSession();
+    render(<App />);
+
+    await waitFor(() => expect(document.body.textContent).toContain('***redacted***'));
+    expect(document.body.textContent).not.toContain('home-row-secret');
+    expect(document.body.textContent).not.toContain('/Items/private-item');
+  });
+
   it('clears a stored token rejected by Jellyfin and returns to sign-in', async () => {
     seedSession();
     mockValidateSession.mockRejectedValue({

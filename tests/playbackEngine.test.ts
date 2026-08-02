@@ -207,6 +207,93 @@ describe('PlaybackEngine authoritative lifecycle', () => {
     });
   });
 
+  it('starts when loadeddata provides current media data on webOS', async () => {
+    const video = new FakeVideoElement();
+    const engine = new PlaybackEngine(undefined, {}, {
+      resolveSource: vi.fn(async () => resolvedSource())
+    });
+    engine.attach(asVideo(video));
+
+    const started = engine.start({ itemId: 'movie-current-data' });
+    await flushPromises();
+    expect(video.play).not.toHaveBeenCalled();
+
+    video.readyState = 2;
+    video.dispatchEvent(new Event('loadeddata'));
+
+    await expect(started).resolves.toMatchObject({ status: 'started' });
+    expect(video.play).toHaveBeenCalledTimes(1);
+    engine.dispose();
+  });
+
+  it('gives a transcode a bounded startup window beyond the direct-play deadline', async () => {
+    vi.useFakeTimers();
+    const video = new FakeVideoElement();
+    const engine = new PlaybackEngine(undefined, {}, {
+      resolveSource: vi.fn(async () => ({ ...resolvedSource(), mode: 'transcode' as const }))
+    });
+    engine.attach(asVideo(video));
+
+    const started = engine.start({ itemId: 'movie-slow-transcode' });
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(16_000);
+
+    expect(engine.getState()).toBe('loading');
+    expect(video.play).not.toHaveBeenCalled();
+    video.readyState = 2;
+    video.dispatchEvent(new Event('loadeddata'));
+
+    await expect(started).resolves.toMatchObject({ status: 'started' });
+    expect(video.play).toHaveBeenCalledTimes(1);
+    engine.dispose();
+    vi.useRealTimers();
+  });
+
+  it('ends an inactive transcode at its 30-second hard deadline', async () => {
+    vi.useFakeTimers();
+    const video = new FakeVideoElement();
+    const engine = new PlaybackEngine(undefined, {}, {
+      resolveSource: vi.fn(async () => ({ ...resolvedSource(), mode: 'transcode' as const }))
+    });
+    engine.attach(asVideo(video));
+
+    const started = engine.start({ itemId: 'movie-inactive-transcode' });
+    const rejected = expect(started).rejects.toThrow('30000ms waiting for media readiness');
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(engine.getState()).toBe('loading');
+    await vi.advanceTimersByTimeAsync(2);
+    await rejected;
+
+    expect(engine.getState()).toBe('error');
+    engine.dispose();
+    vi.useRealTimers();
+  });
+
+  it('does not let stalled or suspended events extend the hard readiness deadline', async () => {
+    vi.useFakeTimers();
+    const video = new FakeVideoElement();
+    const engine = new PlaybackEngine(undefined, {}, {
+      resolveSource: vi.fn(async () => resolvedSource()),
+      readinessTimeoutMs: 100
+    });
+    engine.attach(asVideo(video));
+
+    const started = engine.start({ itemId: 'movie-no-readiness' });
+    const rejected = expect(started).rejects.toThrow('100ms waiting for media readiness');
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(90);
+    video.dispatchEvent(new Event('stalled'));
+    video.dispatchEvent(new Event('suspend'));
+    await vi.advanceTimersByTimeAsync(11);
+    await rejected;
+
+    expect(video.play).not.toHaveBeenCalled();
+    expect(engine.getState()).toBe('error');
+    engine.dispose();
+    vi.useRealTimers();
+  });
+
   it('supersedes an unresolved attempt and prevents its stale source from winning', async () => {
     const video = new FakeVideoElement();
     video.readyState = 3;

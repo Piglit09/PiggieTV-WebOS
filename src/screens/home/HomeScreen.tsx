@@ -4,6 +4,7 @@ import { LayoutShell } from '../../components/LayoutShell';
 import { buildRoute, toRouteString } from '../../navigation/router';
 import { canNavigateToDetails, mapPtvItems } from '../../api/jellyfin/mappers';
 import { CardTile } from '../../components/CardTile';
+import { redactSensitiveText } from '../../core/redaction';
 import type { PtvItem } from '../../types/ptv';
 
 interface HomeSectionState {
@@ -17,12 +18,14 @@ interface HomeSectionState {
 function HomeShelf({
   row,
   rowIndex,
+  loadArtwork,
   getPosterUrl,
   onOpen,
   onActive
 }: {
   row: HomeSectionState;
   rowIndex: number;
+  loadArtwork: boolean;
   getPosterUrl: (item: PtvItem) => string | null;
   onOpen: (item: PtvItem, rowId: string) => void;
   onActive: (rowIndex: number) => void;
@@ -60,7 +63,11 @@ function HomeShelf({
               item={item}
               onFocus={() => reveal(index)}
               onOpen={() => onOpen(item, row.id)}
-              posterUrl={getPosterUrl(item)}
+              posterUrl={
+                loadArtwork && index >= Math.max(0, startIndex - 1) && index <= startIndex + visibleCards
+                  ? getPosterUrl(item)
+                  : null
+              }
             />
           ))}
         </ul>
@@ -81,10 +88,11 @@ export function HomeScreen() {
 
   const getPosterUrl = (item: PtvItem) => {
     if (!client || !item.imageTags) return null;
-    if (item.imageTags.Primary) return client.getImageUrl(item.id, 'Primary', item.imageTags.Primary);
-    if (item.imageTags.Poster) return client.getImageUrl(item.id, 'Poster', item.imageTags.Poster);
-    if (item.imageTags.Thumb) return client.getImageUrl(item.id, 'Thumb', item.imageTags.Thumb);
-    if (item.imageTags.Backdrop) return client.getImageUrl(item.id, 'Backdrop', item.imageTags.Backdrop);
+    const options = { maxWidth: 320, quality: 80 };
+    if (item.imageTags.Primary) return client.getImageUrl(item.id, 'Primary', item.imageTags.Primary, options);
+    if (item.imageTags.Poster) return client.getImageUrl(item.id, 'Poster', item.imageTags.Poster, options);
+    if (item.imageTags.Thumb) return client.getImageUrl(item.id, 'Thumb', item.imageTags.Thumb, options);
+    if (item.imageTags.Backdrop) return client.getImageUrl(item.id, 'Backdrop', item.imageTags.Backdrop, options);
     return null;
   };
 
@@ -127,7 +135,9 @@ export function HomeScreen() {
             Recursive: true,
             SortBy: 'DateCreated',
             SortOrder: 'Descending',
-            Fields: 'ImageTags,ProductionYear,RunTimeTicks,UserData,Overview'
+            Fields: 'ImageTags',
+            EnableUserData: false,
+            EnableTotalRecordCount: false
           }, controller.signal);
           section.items = mapPtvItems(response);
         } else if (section.id === 'shows') {
@@ -137,7 +147,9 @@ export function HomeScreen() {
             Recursive: true,
             SortBy: 'DateCreated',
             SortOrder: 'Descending',
-            Fields: 'ImageTags,ProductionYear,RunTimeTicks,UserData,Overview'
+            Fields: 'ImageTags',
+            EnableUserData: false,
+            EnableTotalRecordCount: false
           }, controller.signal);
           section.items = mapPtvItems(response);
         } else {
@@ -150,22 +162,35 @@ export function HomeScreen() {
       } catch (cause) {
         if (controller.signal.aborted) return;
         section.loading = false;
-        section.error = cause instanceof Error ? cause.message : 'Failed to load row';
+        const message = cause instanceof Error
+          ? cause.message
+          : cause && typeof cause === 'object' && 'message' in cause && typeof cause.message === 'string'
+            ? cause.message
+            : 'Failed to load row';
+        section.error = redactSensitiveText(message);
       }
 
       if (!active) return;
       setSections(previous => previous.map(entry => (entry.id === section.id ? { ...entry, ...section } : entry)));
     };
 
-    const loaders: Promise<void>[] = [
-      load({ id: 'continue', title: headers.continue, items: [], loading: true, error: null }),
-      load({ id: 'nextup', title: headers.nextup, items: [], loading: true, error: null }),
-      load({ id: 'movies', title: headers.movies, items: [], loading: true, error: null }),
-      load({ id: 'shows', title: headers.shows, items: [], loading: true, error: null }),
-      load({ id: 'recent', title: headers.recent, items: [], loading: true, error: null })
+    const queue: HomeSectionState[] = [
+      { id: 'continue', title: headers.continue, items: [], loading: true, error: null },
+      { id: 'nextup', title: headers.nextup, items: [], loading: true, error: null },
+      { id: 'movies', title: headers.movies, items: [], loading: true, error: null },
+      { id: 'shows', title: headers.shows, items: [], loading: true, error: null },
+      { id: 'recent', title: headers.recent, items: [], loading: true, error: null }
     ];
 
-    Promise.allSettled(loaders);
+    const worker = async () => {
+      while (active && !controller.signal.aborted) {
+        const section = queue.shift();
+        if (!section) return;
+        await load(section);
+      }
+    };
+
+    void Promise.allSettled([worker(), worker(), worker()]);
 
     return () => {
       active = false;
@@ -208,6 +233,7 @@ export function HomeScreen() {
               key={row.id}
               row={row}
               rowIndex={rowIndex}
+              loadArtwork={rowIndex >= Math.max(0, activeRow - 2) && rowIndex <= activeRow + 2}
               getPosterUrl={getPosterUrl}
               onOpen={openItem}
               onActive={setActiveRow}

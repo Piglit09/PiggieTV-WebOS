@@ -157,13 +157,16 @@ export class JellyfinApiClient {
   }
 
   public async discoverCapabilities(timeoutMs = 10000, signal?: AbortSignal): Promise<PtvCapability[]> {
-    const system = await this.getSystemInfo(timeoutMs, {}, signal);
+    void timeoutMs;
+    if (signal?.aborted) {
+      throw toPtvError('Request cancelled', 'cancelled-request');
+    }
     return [
       { id: 'quick-connect', label: 'Quick Connect', enabled: true, details: { path: `${this.baseUrl}/QuickConnect` } },
       { id: 'playback-direct-play', label: 'Direct play', enabled: true },
       { id: 'playback-direct-stream', label: 'Direct stream', enabled: true },
       { id: 'playback-transcode', label: 'Transcode', enabled: true },
-      { id: 'jellyfin-server', label: system.ServerName || 'Jellyfin', enabled: true, details: { version: system.Version } }
+      { id: 'jellyfin-server', label: 'Jellyfin', enabled: true }
     ];
   }
 
@@ -260,7 +263,7 @@ export class JellyfinApiClient {
     return this.get<{ Items: Array<Record<string, unknown>> }>(`Users/${encodeURIComponent(sessionUserId)}/Items/Resume`, {
       IncludeItemTypes: itemTypes,
       Limit: limit,
-      Fields: 'ImageTags,ProductionYear,RunTimeTicks,UserData,SeriesName,Overview',
+      Fields: 'ImageTags,UserData,SeriesName',
       EnableUserData: true,
       EnableTotalRecordCount: false
     }, undefined, signal);
@@ -272,7 +275,7 @@ export class JellyfinApiClient {
       {
         UserId: sessionUserId,
         Limit: limit,
-        Fields: 'ImageTags,ProductionYear,RunTimeTicks,SeriesName,SeriesId,SeasonId,Overview,UserData',
+        Fields: 'ImageTags,UserData,SeriesName',
         EnableUserData: true,
         EnableTotalRecordCount: false
       },
@@ -289,8 +292,10 @@ export class JellyfinApiClient {
         SortOrder: 'Descending',
         IncludeItemTypes: includeType,
         Limit: limit,
-        Fields: 'ImageTags,ProductionYear,RunTimeTicks,UserData,Overview,Genres',
-        Recursive: true
+        Fields: 'ImageTags',
+        Recursive: true,
+        EnableUserData: false,
+        EnableTotalRecordCount: false
       },
       undefined,
       signal
@@ -348,8 +353,13 @@ export class JellyfinApiClient {
     return this.post<PtvPlaybackInfoResponse>(
       `Items/${encodeURIComponent(itemId)}/PlaybackInfo`,
       payload,
-      undefined,
-      signal
+      20_000,
+      signal,
+      'playback',
+      {
+        retries: 0,
+        requestRoute: 'POST Items/{item}/PlaybackInfo'
+      }
     );
   }
 
@@ -374,17 +384,22 @@ export class JellyfinApiClient {
     });
   }
 
-  public getImageUrl(itemId: string, imageType: 'Primary' | 'Backdrop' | 'Logo' | 'Thumb' | 'Poster', tag?: string) {
+  public getImageUrl(
+    itemId: string,
+    imageType: 'Primary' | 'Backdrop' | 'Logo' | 'Thumb' | 'Poster',
+    tag?: string,
+    options: { maxWidth?: number; quality?: number } = {}
+  ) {
     const params: Record<string, string | number | boolean | undefined> = {
-      quality: 90
+      quality: options.quality ?? 90
     };
     if (this.accessToken) {
       params.api_key = this.accessToken;
     }
     if (tag) params.tag = tag;
-    if (imageType === 'Backdrop') params.maxWidth = 1280;
-    if (imageType === 'Thumb' || imageType === 'Poster') params.maxWidth = 640;
-    if (imageType === 'Primary' || imageType === 'Logo') params.maxWidth = 900;
+    if (imageType === 'Backdrop') params.maxWidth = options.maxWidth ?? 1280;
+    if (imageType === 'Thumb' || imageType === 'Poster') params.maxWidth = options.maxWidth ?? 640;
+    if (imageType === 'Primary' || imageType === 'Logo') params.maxWidth = options.maxWidth ?? 900;
 
     return `${this.withPath(`Items/${encodeURIComponent(itemId)}/Images/${imageType}`)}?` +
       new URLSearchParams(

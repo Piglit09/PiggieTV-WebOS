@@ -250,12 +250,14 @@ interface ReadinessWaiter {
   resolve: () => void;
   reject: (error: Error) => void;
   timeoutHandle: number;
+  timeoutMs: number;
   abortListener: () => void;
 }
 
-const HAVE_FUTURE_DATA = 3;
+const HAVE_CURRENT_DATA = 2;
 const DEFAULT_PROGRESS_INTERVAL_MS = 5_000;
 const DEFAULT_READINESS_TIMEOUT_MS = 15_000;
+const TRANSCODE_READINESS_TIMEOUT_MS = 30_000;
 const MAX_DIAGNOSTIC_RANGES = 8;
 const MAX_TIME_RANGES_TO_SCAN = 64;
 const MAX_MEDIA_EVENT_HISTORY = 80;
@@ -829,30 +831,40 @@ export class PlaybackEngine {
 
   private waitForReadiness(attempt: ActivePlaybackAttempt) {
     if (!this.media) return Promise.reject(new Error('Video element was detached while loading'));
-    if (this.media.readyState >= HAVE_FUTURE_DATA) return Promise.resolve();
+    if (this.media.readyState >= HAVE_CURRENT_DATA) return Promise.resolve();
 
     return new Promise<void>((resolve, reject) => {
-      const timeoutMs = this.dependencies.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
+      const timeoutMs = this.dependencies.readinessTimeoutMs ?? (
+        attempt.resolvedSource?.mode === 'transcode'
+          ? TRANSCODE_READINESS_TIMEOUT_MS
+          : DEFAULT_READINESS_TIMEOUT_MS
+      );
       const abortListener = () => {
         this.clearReadinessWaiter(attempt.id, cancelledError());
       };
-      const timeoutHandle = this.scheduleTimeout(() => {
-        this.clearReadinessWaiter(attempt.id, new Error('Timed out waiting for media readiness'));
-      }, timeoutMs);
-      this.readinessWaiter = {
+      const waiter: ReadinessWaiter = {
         attemptId: attempt.id,
         resolve,
         reject,
-        timeoutHandle,
+        timeoutHandle: 0,
+        timeoutMs,
         abortListener
       };
+      this.readinessWaiter = waiter;
+      waiter.timeoutHandle = this.scheduleTimeout(() => {
+        if (this.readinessWaiter !== waiter) return;
+        this.clearReadinessWaiter(
+          waiter.attemptId,
+          new Error(`Timed out after ${waiter.timeoutMs}ms waiting for media readiness`)
+        );
+      }, waiter.timeoutMs);
       attempt.controller.signal.addEventListener('abort', abortListener, { once: true });
     });
   }
 
   private resolveReadinessIfReady() {
     const waiter = this.readinessWaiter;
-    if (!waiter || !this.media || this.media.readyState < HAVE_FUTURE_DATA) return;
+    if (!waiter || !this.media || this.media.readyState < HAVE_CURRENT_DATA) return;
     this.readinessWaiter = null;
     this.cancelTimeout(waiter.timeoutHandle);
     const attempt = this.activeAttempt;
@@ -1121,10 +1133,12 @@ export class PlaybackEngine {
 
   private readonly handlePassiveMediaEvent = (event: Event) => {
     this.recordMediaEvent(event.type);
+    this.resolveReadinessIfReady();
   };
 
   private readonly handleLoadedMetadata = () => {
     this.recordMediaEvent('loadedmetadata');
+    this.resolveReadinessIfReady();
   };
 
   private readonly handleLoadedData = () => {
@@ -1134,6 +1148,7 @@ export class PlaybackEngine {
 
   private readonly handleDurationChange = () => {
     this.recordMediaEvent('durationchange');
+    this.resolveReadinessIfReady();
   };
 
   private readonly handleCanPlay = () => {
@@ -1157,11 +1172,13 @@ export class PlaybackEngine {
 
   private readonly handleWaiting = () => {
     this.recordMediaEvent('waiting');
+    this.resolveReadinessIfReady();
     if (this.state === 'playing') this.transition('buffering');
   };
 
   private readonly handleStalled = () => {
     this.recordMediaEvent('stalled');
+    this.resolveReadinessIfReady();
     if (this.state === 'playing') this.transition('buffering');
   };
 

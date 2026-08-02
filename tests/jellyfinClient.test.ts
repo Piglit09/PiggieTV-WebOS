@@ -71,4 +71,80 @@ describe('JellyfinApiClient server identity compatibility', () => {
       kind: 'invalid-server-response'
     });
   });
+
+  it('derives static client capabilities without a duplicate server request', async () => {
+    const capabilities = await createClient().discoverCapabilities();
+
+    expect(capabilities.map(capability => capability.id)).toEqual(expect.arrayContaining([
+      'quick-connect',
+      'playback-direct-play',
+      'playback-direct-stream',
+      'playback-transcode',
+      'jellyfin-server'
+    ]));
+    expect(requestJson).not.toHaveBeenCalled();
+  });
+
+  it('uses lean Home queries and disables unneeded result counts', async () => {
+    requestJson.mockResolvedValue({ Items: [] });
+    const client = createClient();
+
+    await client.getResume('user-1', 'Movie,Series,Episode', 10);
+    await client.getNextUp('user-1', 10);
+    await client.getRecentlyAdded('user-1', 'Movie,Series', 12);
+
+    expect(requestJson.mock.calls[0]?.[1]).toMatchObject({
+      query: {
+        Fields: 'ImageTags,UserData,SeriesName',
+        EnableUserData: true,
+        EnableTotalRecordCount: false
+      }
+    });
+    expect(requestJson.mock.calls[1]?.[1]).toMatchObject({
+      query: {
+        Fields: 'ImageTags,UserData,SeriesName',
+        EnableUserData: true,
+        EnableTotalRecordCount: false
+      }
+    });
+    expect(requestJson.mock.calls[2]?.[1]).toMatchObject({
+      query: {
+        Fields: 'ImageTags',
+        EnableUserData: false,
+        EnableTotalRecordCount: false
+      }
+    });
+  });
+
+  it('uses one bounded PlaybackInfo request with a sanitized diagnostic route', async () => {
+    requestJson.mockResolvedValue({ MediaSources: [] });
+
+    await createClient().getPlaybackInfo('user-1', 'private-item-id');
+
+    expect(requestJson).toHaveBeenCalledWith(
+      expect.stringContaining('/Items/private-item-id/PlaybackInfo'),
+      expect.objectContaining({
+        method: 'POST',
+        timeoutMs: 20_000,
+        retries: 0,
+        requestCategory: 'playback',
+        requestRoute: 'POST Items/{item}/PlaybackInfo'
+      }),
+      expect.any(Object)
+    );
+  });
+
+  it('creates card-sized image URLs without changing detail-image defaults', () => {
+    const client = createClient();
+    const cardUrl = new URL(client.getImageUrl('item-1', 'Primary', 'tag-1', {
+      maxWidth: 320,
+      quality: 80
+    }));
+    const detailUrl = new URL(client.getImageUrl('item-1', 'Primary', 'tag-1'));
+
+    expect(cardUrl.searchParams.get('maxWidth')).toBe('320');
+    expect(cardUrl.searchParams.get('quality')).toBe('80');
+    expect(detailUrl.searchParams.get('maxWidth')).toBe('900');
+    expect(detailUrl.searchParams.get('quality')).toBe('90');
+  });
 });
