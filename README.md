@@ -1,0 +1,69 @@
+# PiggieTV webOS Native (Phase-1 Foundation)
+
+This repository scaffolds a native webOS client for PiggieTV. It uses direct Jellyfin API calls and does not embed the Jellyfin web UI.
+
+## What is included
+
+- React + TypeScript TV shell
+- Login flow:
+  - server setup
+  - username/password
+  - quick connect flow
+- Persistent storage for recent servers and sessions
+- Home/browse/search/details/playback/settings/diagnostics screens
+- Focus manager with directional navigation primitives
+- Playback request building + progress reporting primitives
+- Request/error tracking and redacted diagnostics capture
+- Packaging scripts for `ares-package`, `ares-install`, and `ares-launch`
+
+## Not implemented yet
+
+- Full parity for rich metadata rendering
+- Complete subtitle/audio selection and quality switching in playback controls
+- Extensive phase-2/3 feature set (music/comics/live TV/recommended rows)
+
+## Quick start
+
+```bash
+npm install
+npm run dev
+```
+
+## Build
+
+```bash
+npm run build
+```
+
+## webOS package
+
+```bash
+npm run package
+npm run webos:install
+npm run webos:launch
+```
+
+## Device / TV connection
+
+Set the target device by following:
+
+```bash
+ares-setup-device
+ares-setup-device --list
+```
+
+Use environment overrides if desired (copy values from `.env.example`):
+
+- `PTV_WEBOS_TEST_DEVICE`
+
+Example:
+
+```bash
+$env:PTV_WEBOS_TEST_DEVICE="PiggieTV-LG"   # PowerShell
+```
+
+## Safety notes
+
+- Tokens are stored through the local storage abstraction and never logged raw.
+- Passwords are never persisted.
+- Diagnostics redacts server/user identifiers.

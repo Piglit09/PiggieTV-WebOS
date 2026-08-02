@@ -1,0 +1,12 @@
+{
+  "id": "com.piggietv.webosnative",
+  "version": "0.1.0",
+  "vendor": "PiggieTV",
+  "type": "web",
+  "main": "index.html",
+  "title": "PiggieTV",
+  "icon": "icon.png",
+  "largeIcon": "icon.png",
+  "requiredPermissions": [],
+  "resolution": "1920x1080"
+}

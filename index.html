@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, viewport-fit=cover, initial-scale=1.0" />
+    <title>PiggieTV</title>
+    <meta name="description" content="PiggieTV native webOS client." />
+    <script>
+      (function () {
+        function updateBootstrapStatus(message, isError) {
+          var statusEl = document.getElementById('ptv-bootstrap-status');
+          if (!statusEl) {
+            return;
+          }
+          statusEl.textContent = message;
+          if (isError) {
+            statusEl.style.borderColor = '#ff7d7d';
+            statusEl.style.background = 'rgba(65, 16, 16, 0.85)';
+            statusEl.style.color = '#ffe2e2';
+          }
+        }
+
+        window.__ptvSetBootstrapStatus = function (message, isError) {
+          updateBootstrapStatus(message, isError);
+        };
+
+        window.__ptvSetBootstrapStatus('PTV bootstrap script initialized');
+        var hasModuleSupport = 'noModule' in document.createElement('script');
+        if (location && location.protocol === 'file:' && hasModuleSupport) {
+          window.__vite_is_modern_browser = true;
+        }
+
+        window.addEventListener('error', function (event) {
+          updateBootstrapStatus('PTV load error: ' + (event.message || 'unknown error'), true);
+        });
+
+        window.addEventListener('unhandledrejection', function (event) {
+          var reason = event && event.reason;
+          var message = reason && reason.message ? reason.message : 'unknown promise rejection';
+          updateBootstrapStatus('PTV promise error: ' + message, true);
+        });
+
+        setTimeout(function () {
+          updateBootstrapStatus('PTV loading scripts');
+        }, 1000);
+      }());
+    </script>
+    <style>
+      #ptv-bootstrap-status {
+        margin: 32px;
+        padding: 14px 18px;
+        background: rgba(19, 14, 35, 0.85);
+        border: 1px solid rgba(145, 97, 209, 0.45);
+        color: #e9e6ff;
+        border-radius: 12px;
+        font-family: 'Segoe UI', Arial, sans-serif;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div id="ptv-bootstrap-status">PiggieTV is loading...</div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,81 @@
+#!/usr/bin/env node
+
+const fs = require('fs');
+const path = require('path');
+const { execSync } = require('child_process');
+
+const root = process.cwd();
+const stagingDir = path.join(root, 'dist', '.ptv-webos-package');
+const outputDir = path.join(root, 'dist', 'pkgs');
+const inspectFlag = process.argv.includes('--inspect') ? '-v' : '';
+const appInfo = JSON.parse(fs.readFileSync(path.join(root, 'appinfo.json'), 'utf8'));
+const appId = appInfo.id;
+const appVersion = appInfo.version;
+const appName = `${appId}_${appVersion}_all.ipk`;
+
+function removePath(target) {
+  if (fs.existsSync(target)) {
+    fs.rmSync(target, { recursive: true, force: true });
+  }
+}
+
+function copyFileOrThrow(source, target) {
+  fs.cpSync(source, target, { recursive: false, force: true });
+}
+
+function copyDirOrThrow(source, target) {
+  fs.cpSync(source, target, { recursive: true, force: true });
+}
+
+function run() {
+  removePath(stagingDir);
+  fs.mkdirSync(stagingDir, { recursive: true });
+  removePath(outputDir);
+  fs.mkdirSync(outputDir, { recursive: true });
+
+  copyFileOrThrow(path.join(root, 'appinfo.json'), path.join(stagingDir, 'appinfo.json'));
+  copyFileOrThrow(path.join(root, 'icon.png'), path.join(stagingDir, 'icon.png'));
+  copyFileOrThrow(path.join(root, 'build', 'index.html'), path.join(stagingDir, 'index.html'));
+  copyDirOrThrow(path.join(root, 'build', 'assets'), path.join(stagingDir, 'assets'));
+
+  const stagingIndexPath = path.join(stagingDir, 'index.html');
+  let stagingIndexHtml = fs.readFileSync(stagingIndexPath, 'utf8');
+  const legacyEntryMatch = stagingIndexHtml.match(/<script[^>]+id="vite-legacy-entry"[^>]+data-src="([^"]+)"[^>]*>[\s\S]*?<\/script>/i);
+  if (!legacyEntryMatch) {
+    throw new Error(`Could not find legacy entry script in ${stagingIndexPath}.`);
+  }
+  const legacyEntrySrc = legacyEntryMatch[1];
+  stagingIndexHtml = stagingIndexHtml.replace(
+    legacyEntryMatch[0],
+    `<script crossorigin id="vite-legacy-entry" src="${legacyEntrySrc}" onload="window.__ptvSetBootstrapStatus && window.__ptvSetBootstrapStatus('PTV legacy bootstrap: main loaded')" onerror="window.__ptvSetBootstrapStatus && window.__ptvSetBootstrapStatus('PTV legacy bootstrap: main script failed', !0)"></script>`
+  );
+
+  const legacyPolyfillMatch = stagingIndexHtml.match(/<script[^>]+id="vite-legacy-polyfill"[^>]+src="([^"]+)"[^>]*><\/script>/i);
+  if (legacyPolyfillMatch) {
+    const legacyPolyfillSrc = legacyPolyfillMatch[1];
+    stagingIndexHtml = stagingIndexHtml.replace(
+      legacyPolyfillMatch[0],
+      `<script crossorigin id="vite-legacy-polyfill" src="${legacyPolyfillSrc}" onload="window.__ptvSetBootstrapStatus && window.__ptvSetBootstrapStatus('PTV legacy bootstrap: polyfill loaded')" onerror="window.__ptvSetBootstrapStatus && window.__ptvSetBootstrapStatus('PTV legacy bootstrap: polyfill failed', !0)"></script>`
+    );
+  }
+
+  fs.writeFileSync(stagingIndexPath, stagingIndexHtml);
+
+  const command = `ares-package "${stagingDir}" -o "${outputDir}" ${inspectFlag}`.trim();
+  execSync(command, { stdio: 'inherit' });
+
+  const files = fs.readdirSync(outputDir).filter((entry) => entry.toLowerCase().endsWith('.ipk'));
+  if (files.length !== 1) {
+    throw new Error(`Expected one package but found ${files.length} in ${outputDir}`);
+  }
+  if (files[0] !== appName) {
+    throw new Error(`Expected package name ${appName} but found ${files[0]}`);
+  }
+
+  const expected = path.join(outputDir, appName);
+  if (!fs.existsSync(expected)) {
+    throw new Error(`Expected package not found at ${expected}`);
+  }
+}
+
+run();

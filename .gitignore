@@ -1,0 +1,32 @@
+node_modules/
+dist/
+build/
+.DS_Store
+*.log
+coverage/
+.cache/
+vite.config.ts.timestamp*
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.keystore
+*.jks
+.ares/
+.webos/
+webos-device*.json
+
+# Generated webOS package material
+*.ipk
+*.tar.gz
+
+# Local hardware-test evidence and diagnostic exports
+artifacts/
+evidence/
+diagnostics/
+screenshots/

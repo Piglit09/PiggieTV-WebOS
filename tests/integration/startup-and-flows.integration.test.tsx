@@ -1,0 +1,389 @@
+import React from 'react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { App } from '../../src/app/App';
+import { defaultStorageState, STORAGE_KEY } from '../../src/storage/sessionStore';
+
+type Deferred<T> = {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+};
+
+const mockValidateServer = vi.fn();
+const mockValidateSession = vi.fn();
+const mockAuthenticateByName = vi.fn();
+const mockAuthenticateWithQuickConnect = vi.fn();
+const mockInitiateQuickConnect = vi.fn();
+const mockGetQuickConnectState = vi.fn();
+const mockDiscoverCapabilities = vi.fn();
+const mockGetResume = vi.fn();
+const mockGetNextUp = vi.fn();
+const mockGetRecentlyAdded = vi.fn();
+const mockGetItems = vi.fn();
+const mockGetItem = vi.fn();
+const mockGetPlaybackInfo = vi.fn();
+const mockReportPlaying = vi.fn();
+const mockReportProgress = vi.fn();
+const mockReportStopped = vi.fn();
+const mockSetAccessToken = vi.fn();
+const serverHistory: string[] = [];
+
+vi.mock('../../src/api/jellyfin/client', () => ({
+  JellyfinApiClient: vi.fn((config: { baseUrl: string }) => {
+    let baseUrl = config.baseUrl;
+    serverHistory.push(baseUrl);
+    return {
+      setAccessToken: (token?: string) => mockSetAccessToken(token),
+      setServer: (next: string) => {
+        baseUrl = next;
+        serverHistory.push(next);
+      },
+      getServerUrl: () => baseUrl,
+      validateServer: (...args: unknown[]) => mockValidateServer(...args),
+      validateSession: (...args: unknown[]) => mockValidateSession(...args),
+      authenticateByName: (...args: unknown[]) => mockAuthenticateByName(...args),
+      authenticateWithQuickConnect: (...args: unknown[]) => mockAuthenticateWithQuickConnect(...args),
+      initiateQuickConnect: (...args: unknown[]) => mockInitiateQuickConnect(...args),
+      getQuickConnectState: (...args: unknown[]) => mockGetQuickConnectState(...args),
+      discoverCapabilities: (...args: unknown[]) => mockDiscoverCapabilities(...args),
+      getResume: (...args: unknown[]) => mockGetResume(...args),
+      getNextUp: (...args: unknown[]) => mockGetNextUp(...args),
+      getRecentlyAdded: (...args: unknown[]) => mockGetRecentlyAdded(...args),
+      getItems: (...args: unknown[]) => mockGetItems(...args),
+      getItem: (...args: unknown[]) => mockGetItem(...args),
+      getPlaybackInfo: (...args: unknown[]) => mockGetPlaybackInfo(...args),
+      reportPlaying: (...args: unknown[]) => mockReportPlaying(...args),
+      reportProgress: (...args: unknown[]) => mockReportProgress(...args),
+      reportStopped: (...args: unknown[]) => mockReportStopped(...args),
+      getImageUrl: (itemId: string, imageType: string, tag?: string) =>
+        `https://server.example.com/Items/${itemId}/Images/${imageType}?tag=${tag ?? ''}`
+    };
+  }),
+  resolvePlaybackStreamUrl: vi.fn(() => 'https://server.example.com/Videos/item/stream?api_key=redacted'),
+  createPlaybackStreamUrl: vi.fn(() => 'https://server.example.com/Videos/item/stream?api_key=redacted')
+}));
+
+function defer<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(res => { resolve = res; });
+  return { promise, resolve };
+}
+
+function systemInfo(serverId = 'server-demo') {
+  return {
+    ServerId: serverId,
+    ServerName: 'PiggieTV',
+    Version: '10.11.11'
+  };
+}
+
+function seedSession(overrides: Record<string, unknown> = {}) {
+  const now = Date.now();
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({
+    ...defaultStorageState(),
+    servers: [{
+      serverId: 'server-demo',
+      baseUrl: 'https://server.example.com',
+      serverName: 'PiggieTV',
+      serverVersion: '10.11.11',
+      connectedAt: now
+    }],
+    session: {
+      schemaVersion: 1,
+      serverUrl: 'https://server.example.com',
+      accessToken: 'stored-token',
+      userId: 'user-1',
+      userName: 'Stored User',
+      deviceId: 'device-1',
+      deviceName: 'LG webOS TV',
+      applicationVersion: '0.1.0',
+      savedAt: now
+    },
+    lastServerUrl: 'https://server.example.com',
+    recentServers: ['https://server.example.com'],
+    ...overrides
+  }));
+}
+
+async function waitForAuth() {
+  return screen.findByRole('button', { name: /^sign in$/i });
+}
+
+beforeEach(() => {
+  vi.useRealTimers();
+  localStorage.clear();
+  serverHistory.length = 0;
+  for (const mock of [
+    mockValidateServer,
+    mockValidateSession,
+    mockAuthenticateByName,
+    mockAuthenticateWithQuickConnect,
+    mockInitiateQuickConnect,
+    mockGetQuickConnectState,
+    mockDiscoverCapabilities,
+    mockGetResume,
+    mockGetNextUp,
+    mockGetRecentlyAdded,
+    mockGetItems,
+    mockGetItem,
+    mockGetPlaybackInfo,
+    mockReportPlaying,
+    mockReportProgress,
+    mockReportStopped,
+    mockSetAccessToken
+  ]) mock.mockReset();
+
+  mockValidateServer.mockResolvedValue(systemInfo());
+  mockValidateSession.mockResolvedValue({ Id: 'user-1', Name: 'Stored User' });
+  mockAuthenticateByName.mockResolvedValue({
+    User: { Id: 'user-1', Name: 'Local User' },
+    AccessToken: 'new-token',
+    ServerId: 'server-demo'
+  });
+  mockInitiateQuickConnect.mockResolvedValue({ Secret: 'quick-secret', Code: 'ABCD12' });
+  mockGetQuickConnectState.mockResolvedValue({
+    Authenticated: true,
+    Secret: 'quick-secret',
+    Code: 'ABCD12',
+    DateAdded: '2026-08-01T00:00:00Z',
+    DeviceId: 'device-1',
+    DeviceName: 'LG webOS TV',
+    AppName: 'PiggieTV',
+    AppVersion: '0.1.0'
+  });
+  mockAuthenticateWithQuickConnect.mockResolvedValue({
+    User: { Id: 'user-1', Name: 'Local User' },
+    AccessToken: 'quick-token',
+    ServerId: 'server-demo'
+  });
+  mockDiscoverCapabilities.mockResolvedValue([]);
+  mockGetResume.mockResolvedValue({ Items: [] });
+  mockGetNextUp.mockResolvedValue({ Items: [] });
+  mockGetRecentlyAdded.mockResolvedValue({ Items: [] });
+  mockGetItems.mockResolvedValue({ Items: [] });
+  mockGetItem.mockResolvedValue({ Id: 'movie-1', Name: 'Featured Movie', Type: 'Movie', Overview: 'Overview' });
+  mockGetPlaybackInfo.mockResolvedValue({
+    PlaySessionId: 'play-session-1',
+    MediaSources: [{
+      Id: 'source-1',
+      Container: 'mp4',
+      VideoCodec: 'h264',
+      AudioCodec: 'aac',
+      SupportsDirectPlay: true,
+      SupportsDirectStream: true,
+      SupportsTranscoding: true
+    }]
+  });
+  mockReportPlaying.mockResolvedValue({});
+  mockReportProgress.mockResolvedValue({});
+  mockReportStopped.mockResolvedValue({});
+});
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
+
+describe('integration: startup and canonical session restore', () => {
+  it('validates the production server and shows sign-in without a Guest flash', async () => {
+    render(<App />);
+    await waitForAuth();
+    expect(mockValidateServer).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('Not signed in')).toBeTruthy();
+    expect(screen.queryByText('Guest')).toBeNull();
+  });
+
+  it('restores Home only after the stored current-user endpoint validates', async () => {
+    seedSession();
+    render(<App />);
+
+    await screen.findByRole('heading', { name: 'PiggieTV' });
+    expect(mockValidateSession).toHaveBeenCalledWith('user-1', 8_000, expect.any(AbortSignal));
+    expect(mockSetAccessToken).toHaveBeenCalledWith('stored-token');
+    expect(screen.queryByRole('button', { name: /^sign in$/i })).toBeNull();
+  });
+
+  it('clears a stored token rejected by Jellyfin and returns to sign-in', async () => {
+    seedSession();
+    mockValidateSession.mockRejectedValue({
+      kind: 'authentication-failed',
+      message: 'Unauthorized',
+      code: 401,
+      recoverable: true
+    });
+    render(<App />);
+
+    await waitForAuth();
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as { session?: unknown };
+    expect(stored.session).toBeNull();
+    expect(mockSetAccessToken).toHaveBeenLastCalledWith(undefined);
+  });
+});
+
+describe('integration: password authentication ownership', () => {
+  it('commits one canonical session and navigates to Home', async () => {
+    render(<App />);
+    await waitForAuth();
+    fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'tester' } });
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: ' secret with spaces ' } });
+    fireEvent.click(screen.getByRole('button', { name: /^sign in$/i }));
+
+    await screen.findByRole('heading', { name: 'PiggieTV' });
+    expect(mockAuthenticateByName).toHaveBeenCalledTimes(1);
+    expect(mockAuthenticateByName.mock.calls[0]?.[1]).toBe(' secret with spaces ');
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as { session: Record<string, unknown> };
+    expect(stored.session).toEqual(expect.objectContaining({
+      serverUrl: 'https://piggietv.com',
+      userId: 'user-1',
+      userName: 'Local User',
+      accessToken: 'new-token'
+    }));
+    expect(stored.session).not.toHaveProperty('serverId');
+  });
+
+  it('still commits a valid response after the StrictMode view cleanup/remount cycle', async () => {
+    render(<React.StrictMode><App /></React.StrictMode>);
+    await waitForAuth();
+    fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'tester' } });
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'secret' } });
+    fireEvent.click(screen.getByRole('button', { name: /^sign in$/i }));
+
+    await screen.findByRole('heading', { name: 'PiggieTV' });
+    expect(mockAuthenticateByName).toHaveBeenCalledTimes(1);
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as { session?: { userId?: string } };
+    expect(stored.session?.userId).toBe('user-1');
+  });
+
+  it('enters a retryable terminal error and re-enables Sign in for invalid credentials', async () => {
+    mockAuthenticateByName.mockRejectedValue({
+      kind: 'authentication-failed',
+      message: 'The username or password was not accepted',
+      code: 401
+    });
+    render(<App />);
+    await waitForAuth();
+    fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'bad' } });
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'creds' } });
+    fireEvent.click(screen.getByRole('button', { name: /^sign in$/i }));
+
+    await screen.findByText(/not accepted/i);
+    expect((screen.getByRole('button', { name: /^sign in$/i }) as HTMLButtonElement).disabled).toBe(false);
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as { session?: unknown };
+    expect(stored.session).toBeNull();
+  });
+
+  it('a superseded response cannot overwrite the newer authentication attempt', async () => {
+    const first = defer<Record<string, unknown>>();
+    const second = defer<Record<string, unknown>>();
+    mockAuthenticateByName.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    render(<App />);
+    await waitForAuth();
+    fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'tester' } });
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'first' } });
+    fireEvent.click(screen.getByRole('button', { name: /^sign in$/i }));
+    await screen.findByRole('button', { name: 'Cancel' });
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'second' } });
+    fireEvent.click(screen.getByRole('button', { name: /^sign in$/i }));
+
+    first.resolve({ User: { Id: 'old', Name: 'Old' }, AccessToken: 'old-token', ServerId: 'server-demo' });
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByRole('heading', { name: 'PiggieTV' })).toBeNull();
+
+    second.resolve({ User: { Id: 'new', Name: 'New' }, AccessToken: 'newest-token', ServerId: 'server-demo' });
+    await screen.findByRole('heading', { name: 'PiggieTV' });
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as { session?: { userId?: string } };
+    expect(stored.session?.userId).toBe('new');
+  });
+});
+
+describe('integration: Quick Connect, navigation, and sign-out', () => {
+  it('runs one Quick Connect owner from code to Home', async () => {
+    render(<App />);
+    await waitForAuth();
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole('button', { name: /quick connect/i }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.getByText('ABCD12')).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_100); });
+    expect(screen.getByRole('heading', { name: 'PiggieTV' })).toBeTruthy();
+    expect(mockInitiateQuickConnect).toHaveBeenCalledTimes(1);
+    expect(mockGetQuickConnectState).toHaveBeenCalledTimes(1);
+    expect(mockAuthenticateWithQuickConnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores the selected Home card after Details Back', async () => {
+    seedSession();
+    mockGetResume.mockResolvedValue({ Items: [{ Id: 'movie-1', Name: 'Featured Movie', Type: 'Movie' }] });
+    render(<App />);
+    const card = await screen.findByRole('button', { name: 'Featured Movie' });
+    fireEvent.click(card);
+    await screen.findByText('Overview');
+    fireEvent.click(screen.getByRole('button', { name: '← Back' }));
+
+    const restored = await screen.findByRole('button', { name: 'Featured Movie' });
+    await waitFor(() => expect(document.activeElement).toBe(restored));
+  });
+
+  it('uses one persistent video pipeline and restores Details focus after playback Back', async () => {
+    const load = vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+    seedSession();
+    mockGetResume.mockResolvedValue({ Items: [{ Id: 'movie-1', Name: 'Featured Movie', Type: 'Movie' }] });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Featured Movie' }));
+    await screen.findByText('Overview');
+    fireEvent.click(screen.getByRole('button', { name: /^play$/i }));
+
+    const video = document.querySelector('video');
+    expect(video).toBeTruthy();
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+    expect(mockGetPlaybackInfo).toHaveBeenCalledTimes(1);
+
+    Object.defineProperties(video as HTMLVideoElement, {
+      readyState: { configurable: true, value: 3 },
+      duration: { configurable: true, value: 120 },
+      currentTime: { configurable: true, writable: true, value: 12 }
+    });
+    fireEvent.loadedData(video as HTMLVideoElement);
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    fireEvent.timeUpdate(video as HTMLVideoElement);
+    await act(async () => { await Promise.resolve(); });
+    expect(document.querySelector('video')).toBe(video);
+
+    fireEvent.keyDown(window, { key: 'GoBack', keyCode: 461, which: 461 });
+    const detailsPlay = await screen.findByRole('button', { name: /^play$/i });
+    await waitFor(() => expect(document.activeElement).toBe(detailsPlay));
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(mockReportStopped).toHaveBeenCalledTimes(1);
+  });
+
+  it('sign-out clears memory, API authorization, persistence, and route history', async () => {
+    seedSession();
+    render(<App />);
+    await screen.findByRole('heading', { name: 'PiggieTV' });
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign out' }));
+
+    await waitForAuth();
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as { session?: unknown };
+    expect(stored.session).toBeNull();
+    expect(mockSetAccessToken).toHaveBeenLastCalledWith(undefined);
+    expect(screen.queryByRole('button', { name: '← Back' })).toBeNull();
+  });
+
+  it('normalizes a changed private server before configuring the shared client', async () => {
+    render(<App />);
+    await waitForAuth();
+    fireEvent.click(screen.getByRole('button', { name: 'Change server' }));
+    const input = await screen.findByPlaceholderText('https://PiggieTV.com');
+    fireEvent.change(input, { target: { value: '10.16.0.50:8096' } });
+    fireEvent.click(screen.getByRole('button', { name: /^continue$/i }));
+
+    await waitForAuth();
+    expect(serverHistory).toContain('http://10.16.0.50:8096');
+  });
+});
