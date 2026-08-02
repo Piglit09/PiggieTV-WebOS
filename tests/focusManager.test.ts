@@ -266,6 +266,52 @@ describe('FocusManager', () => {
     });
   });
 
+  it('does not remember a shell control under the next route when it re-registers first', () => {
+    const manager = new FocusManager();
+    const homeShell = createFocusNode('shell-home-old', {
+      left: 0,
+      top: 0,
+      right: 120,
+      bottom: 60,
+      width: 120,
+      height: 60
+    });
+    const detailsShell = createFocusNode('shell-home-new', {
+      left: 0,
+      top: 0,
+      right: 120,
+      bottom: 60,
+      width: 120,
+      height: 60
+    });
+    const detailsPrimary = createFocusNode('details-primary', {
+      left: 0,
+      top: 100,
+      right: 180,
+      bottom: 180,
+      width: 180,
+      height: 80
+    });
+
+    manager.setActiveRoute('home');
+    manager.register({ id: 'shell-home', routeId: 'home', ref: homeShell });
+    manager.register({ id: 'shell-home', routeId: 'details:series-1', ref: detailsShell });
+    manager.setActiveRoute('details:series-1', {
+      fallbackFocusId: 'details-primary',
+      focusFirstIfUnremembered: false
+    });
+
+    expect(manager.getRememberedRouteFocus('details:series-1')).toBeNull();
+    manager.register({
+      id: 'details-primary',
+      routeId: 'details:series-1',
+      ref: detailsPrimary
+    });
+
+    expect(manager.focusId).toBe('details-primary');
+    expect(document.activeElement).toBe(detailsPrimary);
+  });
+
   it('emits diagnostics metadata for directional input', () => {
     const manager = new FocusManager();
     const left = createFocusNode('left', { left: 0, top: 0, right: 100, bottom: 80, width: 100, height: 80 });

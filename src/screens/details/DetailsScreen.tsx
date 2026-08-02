@@ -241,19 +241,12 @@ export function DetailsScreen() {
     if (item?.type !== 'Series' || seasons.length === 0) return undefined;
     const routeId = toRouteString(state.route);
     const remembered = services.focusManager.getRememberedRouteFocus(routeId);
-    if (remembered?.startsWith('details-episode')) return undefined;
+    if (!remembered?.startsWith('details-') || remembered.startsWith('details-episode-')) return undefined;
 
     const frame = window.requestAnimationFrame(() => {
       const currentRemembered = services.focusManager.getRememberedRouteFocus(routeId);
-      if (currentRemembered?.startsWith('details-episode')) return;
-      if (currentRemembered?.startsWith('details-')) {
-        services.focusManager.restoreRouteFocus(routeId, 'details-primary');
-        return;
-      }
-      services.focusManager.focus('details-primary', {
-        routeId,
-        reason: 'route-fallback'
-      });
+      if (!currentRemembered?.startsWith('details-') || currentRemembered.startsWith('details-episode-')) return;
+      services.focusManager.restoreRouteFocus(routeId, 'details-primary');
     });
     return () => window.cancelAnimationFrame(frame);
   }, [item, seasons, services.focusManager, state.route]);

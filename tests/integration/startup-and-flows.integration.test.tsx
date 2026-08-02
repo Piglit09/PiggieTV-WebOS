@@ -579,6 +579,16 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
     expect(screen.getByText('2 / 2')).toBeTruthy();
     await waitFor(() => expect(document.activeElement).toBe(restoredEpisode));
     expect(load).toHaveBeenCalledTimes(2);
+
+    const previousPage = screen.getByRole('button', { name: 'Previous' });
+    fireEvent.focus(previousPage);
+    expect(document.activeElement).toBe(previousPage);
+    fireEvent.keyDown(window, { key: 'GoBack', keyCode: 461, which: 461 });
+    fireEvent.click(await screen.findByRole('button', { name: 'The PTV Show' }));
+
+    const fallbackSeason = await screen.findByRole('button', { name: 'Season 1' });
+    await waitFor(() => expect(document.activeElement).toBe(fallbackSeason));
+    expect(screen.getByText('1 / 2')).toBeTruthy();
   });
 
   it('pages Movies in bounded sets of 16 and restores the selected page/card after Details', async () => {

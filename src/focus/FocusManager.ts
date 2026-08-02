@@ -238,7 +238,10 @@ export class FocusManager {
     const normalizedRouteId = normalizeRouteId(routeId);
     const previous = this.currentFocus;
     const previousNode = previous ? this.nodes.get(previous) : undefined;
-    const previousRouteId = previousNode?.routeId ?? this.activeRouteId;
+    // Shell controls can re-register with the next route before this effect runs.
+    // The manager's active route is therefore the authoritative previous route;
+    // using the node's freshly updated route would poison the new route's memory.
+    const previousRouteId = this.activeRouteId ?? previousNode?.routeId;
 
     if (previous && previousRouteId) {
       this.rememberRouteFocus(previousRouteId, previous);
