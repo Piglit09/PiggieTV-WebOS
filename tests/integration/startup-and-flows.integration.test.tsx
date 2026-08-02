@@ -549,8 +549,9 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'The PTV Show' }));
-    await screen.findByRole('button', { name: 'Season 1' });
+    const firstSeason = await screen.findByRole('button', { name: 'Season 1' });
     await screen.findByRole('button', { name: /^Pilot,/ });
+    await waitFor(() => expect(document.activeElement).toBe(firstSeason));
 
     expect(mockGetPlaybackInfo).not.toHaveBeenCalled();
     expect(mockGetSeasons).toHaveBeenCalledWith('user-1', 'series-1', expect.any(AbortSignal));

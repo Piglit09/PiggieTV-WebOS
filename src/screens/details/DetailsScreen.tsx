@@ -237,6 +237,27 @@ export function DetailsScreen() {
     services.focusManager.restoreRouteFocus(routeId);
   }, [episodePage, episodes, services.focusManager, state.route]);
 
+  useEffect(() => {
+    if (item?.type !== 'Series' || seasons.length === 0) return undefined;
+    const routeId = toRouteString(state.route);
+    const remembered = services.focusManager.getRememberedRouteFocus(routeId);
+    if (remembered?.startsWith('details-episode')) return undefined;
+
+    const frame = window.requestAnimationFrame(() => {
+      const currentRemembered = services.focusManager.getRememberedRouteFocus(routeId);
+      if (currentRemembered?.startsWith('details-episode')) return;
+      if (currentRemembered?.startsWith('details-')) {
+        services.focusManager.restoreRouteFocus(routeId, 'details-primary');
+        return;
+      }
+      services.focusManager.focus('details-primary', {
+        routeId,
+        reason: 'route-fallback'
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [item, seasons, services.focusManager, state.route]);
+
   const startPlayback = (playable: PtvItem, restart = false) => {
     if (!isPlayable(playable) || !state.userSession || !state.serverSession) return;
     const intent: PtvPlaybackIntent = {
