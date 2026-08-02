@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { readAppInfo, runWebOsCli } = require('./webos-common.cjs');
+const { copyValidatedBuildAssets, readAppInfo, runWebOsCli } = require('./webos-common.cjs');
 
 const root = process.cwd();
 const stagingDir = path.join(root, 'dist', '.ptv-webos-package');
@@ -12,6 +12,13 @@ const appInfo = readAppInfo(root);
 const appId = appInfo.id;
 const appVersion = appInfo.version;
 const appName = `${appId}_${appVersion}_all.ipk`;
+const iconNames = [...new Set([appInfo.icon, appInfo.largeIcon].filter(Boolean))];
+
+if (!iconNames.length || iconNames.some(iconName => (
+  typeof iconName !== 'string' || path.basename(iconName) !== iconName || !/^[A-Za-z0-9._-]+\.png$/i.test(iconName)
+))) {
+  throw new Error('appinfo.json must name safe local PNG icon files.');
+}
 
 function removePath(target) {
   if (fs.existsSync(target)) {
@@ -21,10 +28,6 @@ function removePath(target) {
 
 function copyFileOrThrow(source, target) {
   fs.cpSync(source, target, { recursive: false, force: true });
-}
-
-function copyDirOrThrow(source, target) {
-  fs.cpSync(source, target, { recursive: true, force: true });
 }
 
 function assertCleanWorktree() {
@@ -51,9 +54,11 @@ function run() {
   fs.mkdirSync(outputDir, { recursive: true });
 
   copyFileOrThrow(path.join(root, 'appinfo.json'), path.join(stagingDir, 'appinfo.json'));
-  copyFileOrThrow(path.join(root, 'icon.png'), path.join(stagingDir, 'icon.png'));
+  for (const iconName of iconNames) {
+    copyFileOrThrow(path.join(root, iconName), path.join(stagingDir, iconName));
+  }
   copyFileOrThrow(path.join(root, 'build', 'index.html'), path.join(stagingDir, 'index.html'));
-  copyDirOrThrow(path.join(root, 'build', 'assets'), path.join(stagingDir, 'assets'));
+  copyValidatedBuildAssets(path.join(root, 'build', 'assets'), path.join(stagingDir, 'assets'));
 
   const stagingIndexPath = path.join(stagingDir, 'index.html');
   let stagingIndexHtml = fs.readFileSync(stagingIndexPath, 'utf8');

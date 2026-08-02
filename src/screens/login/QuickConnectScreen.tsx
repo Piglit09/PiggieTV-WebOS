@@ -57,7 +57,6 @@ export function QuickConnectScreen() {
           >
             Retry
           </FocusableButton>
-          <FocusableButton focusId="qc-back" onClick={goBack}>Back</FocusableButton>
           <FocusableButton
             focusId="qc-diagnostics-toggle"
             onClick={() => setDiagnosticsOpen(open => !open)}
@@ -77,7 +76,6 @@ export function QuickConnectScreen() {
           <ErrorBanner
             message={sessionState.errorMessage}
             onRetry={() => setRetryKey(value => value + 1)}
-            onBack={goBack}
           />
         ) : null}
       </section>

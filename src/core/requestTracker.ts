@@ -35,10 +35,10 @@ export class RequestTracker {
     const id = `req_${this.sequence++}`;
     const entry: RequestTrackerEntry = {
       id,
-      url: redactSensitiveText(url),
+      url: this.sanitizeUrl(url),
       method,
       category,
-      route,
+      route: route ? this.sanitizeRoute(route) : undefined,
       startedAt: Date.now()
     };
     this.activeRequests.set(id, entry);
@@ -85,6 +85,7 @@ export class RequestTracker {
       existing.error = this.formatErrorMessage(error);
       existing.timedOut = timedOut;
       existing.endedAt = Date.now();
+      existing.durationMs = Math.max(0, existing.endedAt - existing.startedAt);
       if (contentType) {
         existing.contentType = contentType;
       }
@@ -123,6 +124,7 @@ export class RequestTracker {
       existing.cancelled = true;
       existing.error = redactSensitiveText(reason);
       existing.endedAt = Date.now();
+      existing.durationMs = Math.max(0, existing.endedAt - existing.startedAt);
       this.cancelledRequests += 1;
     });
     return entry;
@@ -171,6 +173,12 @@ export class RequestTracker {
     if (!completed.length) return 0;
     const sum = completed.reduce((acc, item) => acc + (item.durationMs ?? 0), 0);
     return Math.round(sum / completed.length);
+  }
+
+  public getSlowestDuration() {
+    return this.completedRequests.reduce((maximum, entry) => (
+      Math.max(maximum, typeof entry.durationMs === 'number' ? entry.durationMs : 0)
+    ), 0);
   }
 
   public getRecentErrors(limit = 15) {
@@ -226,5 +234,24 @@ export class RequestTracker {
     if (this.completedRequests.length > RequestTracker.MAX_HISTORY) {
       this.completedRequests.shift();
     }
+  }
+
+  private sanitizeRoute(route: string) {
+    return redactSensitiveText(route)
+      .replace(/\b(details|playback):[^?\s]+/gi, '$1:[redacted]')
+      .replace(/([?&]section=)[^&\s]+/gi, '$1[redacted]');
+  }
+
+  private sanitizeUrl(rawUrl: string) {
+    const redacted = redactSensitiveText(rawUrl);
+    const queryIndex = redacted.indexOf('?');
+    if (queryIndex < 0) return redacted;
+    const base = redacted.slice(0, queryIndex);
+    const keys = redacted.slice(queryIndex + 1)
+      .split('&')
+      .map(entry => entry.split('=')[0]?.trim())
+      .filter((key): key is string => Boolean(key))
+      .slice(0, 12);
+    return keys.length ? `${base}?${keys.map(key => `${key}=[redacted]`).join('&')}` : base;
   }
 }

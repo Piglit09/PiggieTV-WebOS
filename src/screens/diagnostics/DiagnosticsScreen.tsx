@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useApp } from '../../state/appContext';
 import { LayoutShell } from '../../components/LayoutShell';
 import { buildRoute, toRouteString } from '../../navigation/router';
@@ -8,6 +8,7 @@ import type { PtvDiagnosticsSnapshot } from '../../types/ptv';
 
 interface DiagnosticsPage {
   id: string;
+  label: string;
   title: string;
   content: Record<string, unknown>;
 }
@@ -17,10 +18,11 @@ const PACKAGE_ID = import.meta.env.VITE_PTV_PACKAGE_ID ?? 'com.piggietv.webosnat
 const BUILD_TIMESTAMP = import.meta.env.VITE_PTV_BUILD_TS ?? import.meta.env.VITE_BUILD_TIMESTAMP ?? 'not embedded';
 const COMMIT_HASH = import.meta.env.VITE_PTV_COMMIT?.trim() || null;
 
-function buildPages(snapshot: PtvDiagnosticsSnapshot): DiagnosticsPage[] {
+function buildPages(snapshot: PtvDiagnosticsSnapshot, recentLogs: unknown[]): DiagnosticsPage[] {
   return [
     {
-      id: 'application',
+      id: 'app',
+      label: 'App',
       title: 'Application',
       content: {
         appVersion: snapshot.appVersion,
@@ -32,33 +34,42 @@ function buildPages(snapshot: PtvDiagnosticsSnapshot): DiagnosticsPage[] {
         tvModel: snapshot.tvModel,
         viewport: snapshot.viewport,
         dpr: snapshot.dpr,
-        userAgent: snapshot.userAgent,
         visibilityState: snapshot.visibilityState,
         currentRoute: snapshot.currentRoute,
         previousRoute: snapshot.previousRoute,
-        currentFocusId: snapshot.currentFocusId,
-        previousFocusId: snapshot.previousFocusId,
-        pluginVersion: snapshot.pluginVersion,
-        pluginApiVersion: snapshot.pluginApiVersion,
         capabilities: snapshot.capabilities,
         memoryEstimate: snapshot.memoryEstimate
       }
     },
     {
-      id: 'session',
-      title: 'Authentication and session restore',
+      id: 'home',
+      label: 'Home',
+      title: 'Home performance',
       content: {
-        serverVersion: snapshot.serverVersion,
-        serverUrl: snapshot.serverUrl,
-        userId: snapshot.userId,
-        currentSession: snapshot.currentSession,
-        authentication: snapshot.authentication,
-        sessionRestore: snapshot.sessionRestore,
-        recentSessionRestoreEvents: snapshot.recentSessionRestoreEvents
+        latestAttempt: snapshot.homePerformance?.latestAttempt ?? null,
+        recentAttempts: snapshot.homePerformance?.recentAttempts ?? []
+      }
+    },
+    {
+      id: 'network',
+      label: 'Network',
+      title: 'Network requests',
+      content: {
+        activeRequests: snapshot.activeRequests,
+        peakConcurrentRequests: snapshot.peakConcurrentRequests,
+        averageRequestDuration: snapshot.averageRequestDuration,
+        failedRequestCount: snapshot.failedRequestCount,
+        cancelledRequestCount: snapshot.cancelledRequestCount,
+        timeoutRequestCount: snapshot.timeoutRequestCount,
+        duplicateRequestCount: snapshot.duplicateRequestCount,
+        slowestRequestMs: snapshot.slowestRequestMs,
+        recentFailures: snapshot.recentFailures,
+        recentCompletions: snapshot.recentCompletions
       }
     },
     {
       id: 'playback',
+      label: 'Playback',
       title: 'Playback',
       content: {
         playbackState: snapshot.playbackState,
@@ -70,9 +81,26 @@ function buildPages(snapshot: PtvDiagnosticsSnapshot): DiagnosticsPage[] {
       }
     },
     {
+      id: 'session',
+      label: 'Session',
+      title: 'Session and authentication',
+      content: {
+        serverVersion: snapshot.serverVersion,
+        serverUrl: snapshot.serverUrl,
+        userId: snapshot.userId,
+        currentSession: snapshot.currentSession,
+        authentication: snapshot.authentication,
+        sessionRestore: snapshot.sessionRestore,
+        recentSessionRestoreEvents: snapshot.recentSessionRestoreEvents
+      }
+    },
+    {
       id: 'input',
+      label: 'Input / Focus',
       title: 'Input, focus, and navigation',
       content: {
+        currentFocusId: snapshot.currentFocusId,
+        previousFocusId: snapshot.previousFocusId,
         lastInputEvent: snapshot.lastInputEvent,
         recentInputEvents: snapshot.recentInputEvents,
         lastNavigationEvent: snapshot.lastNavigationEvent,
@@ -83,49 +111,73 @@ function buildPages(snapshot: PtvDiagnosticsSnapshot): DiagnosticsPage[] {
     },
     {
       id: 'lifecycle',
+      label: 'Lifecycle',
       title: 'Lifecycle and errors',
       content: {
         lastLifecycleEvent: snapshot.lastLifecycleEvent,
         recentLifecycleEvents: snapshot.recentLifecycleEvents,
         lastUiError: snapshot.lastUiError,
-        lastPlaybackError: snapshot.lastPlaybackError
-      }
-    },
-    {
-      id: 'requests',
-      title: 'Network requests',
-      content: {
-        activeRequests: snapshot.activeRequests,
-        peakConcurrentRequests: snapshot.peakConcurrentRequests,
-        averageRequestDuration: snapshot.averageRequestDuration,
-        failedRequestCount: snapshot.failedRequestCount,
-        cancelledRequestCount: snapshot.cancelledRequestCount,
-        timeoutRequestCount: snapshot.timeoutRequestCount,
-        duplicateRequestCount: snapshot.duplicateRequestCount,
-        slowestRequestMs: snapshot.slowestRequestMs,
-        requestDurations: snapshot.requestDurations,
-        activeFailures: snapshot.activeFailures,
-        recentFailures: snapshot.recentFailures,
-        recentCompletions: snapshot.recentCompletions
+        lastPlaybackError: snapshot.lastPlaybackError,
+        recentLogs: recentLogs.slice(-20)
       }
     }
   ];
 }
 
-function legacyCopy(text: string) {
-  if (typeof document === 'undefined' || !document.body || typeof document.execCommand !== 'function') {
-    return false;
+function humanLabel(value: string) {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/^./, first => first.toUpperCase());
+}
+
+function PrimitiveValue({ value }: { value: unknown }) {
+  if (value === null || value === undefined || value === '') return <span className="ptv-diagnostic-empty">Unavailable</span>;
+  if (typeof value === 'boolean') return <span>{value ? 'Yes' : 'No'}</span>;
+  if (typeof value === 'number') return <span>{Number.isFinite(value) ? value.toLocaleString() : 'Unavailable'}</span>;
+  return <span>{String(value)}</span>;
+}
+
+function DiagnosticValue({ value, depth = 0 }: { value: unknown; depth?: number }) {
+  if (value === null || value === undefined || typeof value !== 'object') return <PrimitiveValue value={value} />;
+  if (depth >= 4) return <span className="ptv-diagnostic-empty">Nested data available in Raw JSON</span>;
+
+  if (Array.isArray(value)) {
+    if (!value.length) return <span className="ptv-diagnostic-empty">None</span>;
+    const visible = value.slice(-6);
+    return (
+      <div className="ptv-diagnostic-list">
+        {value.length > visible.length ? <span className="ptv-diagnostic-empty">Showing latest {visible.length} of {value.length}</span> : null}
+        {visible.map((entry, index) => (
+          <div className="ptv-diagnostic-list__item" key={index}>
+            <DiagnosticValue value={entry} depth={depth + 1} />
+          </div>
+        ))}
+      </div>
+    );
   }
 
+  return (
+    <dl className={`ptv-diagnostic-kv ptv-diagnostic-kv--depth-${depth}`}>
+      {Object.entries(value as Record<string, unknown>).map(([key, entry]) => (
+        <div key={key}>
+          <dt>{humanLabel(key)}</dt>
+          <dd><DiagnosticValue value={entry} depth={depth + 1} /></dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function legacyCopy(text: string) {
+  if (typeof document === 'undefined' || !document.body || typeof document.execCommand !== 'function') return false;
   const textarea = document.createElement('textarea');
   textarea.value = text;
   textarea.setAttribute('readonly', '');
   textarea.style.position = 'fixed';
   textarea.style.left = '-10000px';
-  textarea.style.top = '0';
   document.body.appendChild(textarea);
   textarea.select();
-
   try {
     return document.execCommand('copy');
   } catch {
@@ -172,21 +224,13 @@ export function DiagnosticsScreen() {
       ],
       mode: import.meta.env.MODE === 'production' ? 'production' : 'development'
     });
-  }, [
-    services,
-    state.capabilities,
-    state.ptvCapabilities,
-    state.route,
-    state.routeHistory,
-    state.serverSession?.serverVersion,
-    state.serverUrl,
-    state.userSession
-  ]);
+  }, [services, state.capabilities, state.ptvCapabilities, state.route, state.routeHistory, state.serverSession?.serverVersion, state.serverUrl, state.userSession]);
 
   const [snapshot, setSnapshot] = useState<PtvDiagnosticsSnapshot>(createSnapshot);
   const [pageIndex, setPageIndex] = useState(0);
-  const [copyStatus, setCopyStatus] = useState('Sanitized diagnostics are ready to copy.');
-  const outputRef = useRef<HTMLPreElement>(null);
+  const [rawVisible, setRawVisible] = useState(false);
+  const [copyStatus, setCopyStatus] = useState('Redacted diagnostics are ready.');
+  const outputRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setSnapshot(createSnapshot());
@@ -194,11 +238,12 @@ export function DiagnosticsScreen() {
     return () => window.clearInterval(timer);
   }, [createSnapshot]);
 
-  const pages = useMemo(() => buildPages(snapshot), [snapshot]);
+  const pages = buildPages(snapshot, services.diagnostics.getRecentLogs());
   const page = pages[pageIndex] ?? pages[0];
 
-  const changePage = (delta: number) => {
-    setPageIndex(current => (current + delta + pages.length) % pages.length);
+  const selectPage = (index: number) => {
+    setPageIndex(index);
+    setRawVisible(false);
     if (outputRef.current) outputRef.current.scrollTop = 0;
   };
 
@@ -206,7 +251,7 @@ export function DiagnosticsScreen() {
     const output = outputRef.current;
     if (!output) return;
     const maximum = Math.max(0, output.scrollHeight - output.clientHeight);
-    const distance = Math.max(120, output.clientHeight - 60);
+    const distance = Math.max(160, output.clientHeight - 80);
     output.scrollTop = Math.max(0, Math.min(maximum, output.scrollTop + direction * distance));
   };
 
@@ -215,53 +260,74 @@ export function DiagnosticsScreen() {
     try {
       if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
         await navigator.clipboard.writeText(text);
-        setCopyStatus('Copied sanitized diagnostics to the clipboard.');
+        setCopyStatus('Copied redacted diagnostics.');
         return;
       }
     } catch {
-      // Older webOS browsers can expose Clipboard APIs that reject at runtime.
+      // Older webOS Clipboard implementations may reject at runtime.
     }
-
     if (legacyCopy(text)) {
-      setCopyStatus('Copied sanitized diagnostics using TV compatibility mode.');
+      setCopyStatus('Copied redacted diagnostics in TV compatibility mode.');
       return;
     }
-
     console.info(`[PiggieTV diagnostics export]\n${text}`);
-    setCopyStatus('Clipboard unavailable. Sanitized diagnostics were exported to the developer console.');
+    setCopyStatus('Clipboard unavailable. Redacted diagnostics were sent to the developer console.');
+  };
+
+  const clearErrors = () => {
+    services.diagnostics.resetErrors();
+    setSnapshot(createSnapshot());
+    setCopyStatus('Current UI and playback errors were cleared.');
   };
 
   const goBack = () => {
-    if (state.routeHistory.length > 0) {
-      dispatch({ type: 'go_back' });
-      return;
-    }
-    dispatch({ type: 'reset_route', route: buildRoute('server') });
+    if (state.routeHistory.length > 0) dispatch({ type: 'go_back' });
+    else dispatch({ type: 'reset_route', route: buildRoute('server') });
   };
 
   return (
-    <LayoutShell title="Diagnostics" onBack={goBack}>
-      <section className="ptv-section ptv-diagnostics">
+    <LayoutShell title="Diagnostics" onBack={goBack} currentSection="settings">
+      <section className="ptv-diagnostics">
         <div className="ptv-diagnostics__heading">
-          <h2>{page?.title ?? 'Diagnostics'}</h2>
-          <span>Page {pageIndex + 1} of {pages.length}</span>
+          <div><span className="ptv-eyebrow">Redacted support evidence</span><h2>Diagnostics</h2></div>
+          <span>{page?.title ?? 'Application'}</span>
         </div>
-        <pre ref={outputRef} className="ptv-diagnostics__output">
-          {services.diagnostics.toDiagnosticText(page?.content ?? {})}
-        </pre>
-        <div className="ptv-row ptv-diagnostics__paging">
-          <FocusableButton focusId="diagnostics-previous" onClick={() => changePage(-1)}>Previous section</FocusableButton>
-          <FocusableButton focusId="diagnostics-next" onClick={() => changePage(1)}>Next section</FocusableButton>
-          <FocusableButton focusId="diagnostics-page-up" onClick={() => scrollPage(-1)}>Page up</FocusableButton>
-          <FocusableButton focusId="diagnostics-page-down" onClick={() => scrollPage(1)}>Page down</FocusableButton>
+
+        <nav className="ptv-diagnostics__tabs" aria-label="Diagnostic categories">
+          {pages.map((candidate, index) => (
+            <FocusableButton
+              key={candidate.id}
+              focusId={`diagnostics-tab-${candidate.id}`}
+              preferredRow="diagnostics-tabs"
+              className={pageIndex === index ? 'is-selected' : ''}
+              aria-current={pageIndex === index ? 'page' : undefined}
+              onClick={() => selectPage(index)}
+            >
+              {candidate.label}
+            </FocusableButton>
+          ))}
+        </nav>
+
+        <div ref={outputRef} className="ptv-diagnostics__output">
+          {rawVisible ? (
+            <pre>{services.diagnostics.toDiagnosticText(page?.content ?? {})}</pre>
+          ) : (
+            <DiagnosticValue value={page?.content ?? {}} />
+          )}
         </div>
-        <div className="ptv-row ptv-diagnostics__actions">
-          <FocusableButton focusId="diagnostics-copy" onClick={() => { void copyDiagnostics(); }}>
-            Copy diagnostics
+
+        <div className="ptv-diagnostics__actions">
+          <FocusableButton focusId="diagnostics-page-up" preferredRow="diagnostics-actions" onClick={() => scrollPage(-1)}>Page up</FocusableButton>
+          <FocusableButton focusId="diagnostics-page-down" preferredRow="diagnostics-actions" onClick={() => scrollPage(1)}>Page down</FocusableButton>
+          <FocusableButton focusId="diagnostics-raw" preferredRow="diagnostics-actions" onClick={() => setRawVisible(value => !value)}>
+            {rawVisible ? 'Human view' : 'Raw JSON'}
           </FocusableButton>
-          <FocusableButton focusId="diagnostics-back" onClick={goBack}>Back</FocusableButton>
-          <p className="ptv-diagnostics__copy-status" role="status" aria-live="polite">{copyStatus}</p>
+          <FocusableButton focusId="diagnostics-copy" preferredRow="diagnostics-actions" onClick={() => { void copyDiagnostics(); }}>
+            Copy Redacted Diagnostics
+          </FocusableButton>
+          <FocusableButton focusId="diagnostics-clear" preferredRow="diagnostics-actions" onClick={clearErrors}>Clear current errors</FocusableButton>
         </div>
+        <p className="ptv-diagnostics__copy-status" role="status" aria-live="polite">{copyStatus}</p>
       </section>
     </LayoutShell>
   );

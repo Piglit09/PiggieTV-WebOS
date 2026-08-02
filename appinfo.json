@@ -5,8 +5,8 @@
   "type": "web",
   "main": "index.html",
   "title": "PiggieTV",
-  "icon": "icon.png",
-  "largeIcon": "icon.png",
+  "icon": "icon-phase2.png",
+  "largeIcon": "largeicon-phase2.png",
   "requiredPermissions": [],
   "resolution": "1920x1080"
 }

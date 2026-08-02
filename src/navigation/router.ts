@@ -8,6 +8,8 @@ export const PTV_ROUTES = [
   'home',
   'movies',
   'shows',
+  'music',
+  'reading',
   'search',
   'details',
   'settings',

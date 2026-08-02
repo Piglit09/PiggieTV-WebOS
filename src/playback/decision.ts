@@ -1,4 +1,4 @@
-import type { PtvPlaybackInfoResponse } from '../api/jellyfin/types';
+import type { PtvPlaybackInfoResponse, PtvPlaybackMediaSource } from '../api/jellyfin/types';
 
 export type PlaybackMode = 'direct-play' | 'direct-stream' | 'transcode';
 
@@ -25,6 +25,18 @@ function toResolution(width?: number | null, height?: number | null) {
   return `${width}x${height}`;
 }
 
+function hasNonEmptyUrl(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function supportsMode(source: PtvPlaybackMediaSource, mode: PlaybackMode) {
+  if (mode === 'direct-play') return source.SupportsDirectPlay;
+  if (mode === 'direct-stream') {
+    return source.SupportsDirectStream && hasNonEmptyUrl(source.DirectStreamUrl);
+  }
+  return source.SupportsTranscoding && hasNonEmptyUrl(source.TranscodingUrl);
+}
+
 export function chooseBestPlaybackSource(
   playbackInfo: PtvPlaybackInfoResponse | null,
   options: PlaybackSelectionInput = {}
@@ -49,11 +61,7 @@ export function chooseBestPlaybackSource(
   for (const mode of orderedModes) {
     const enabled = mode === 'direct-play' ? directPlay : mode === 'direct-stream' ? directStream : allowTranscode;
     if (!enabled) continue;
-    const candidate = sources.find(source => (
-      mode === 'direct-play' ? source.SupportsDirectPlay :
-      mode === 'direct-stream' ? source.SupportsDirectStream :
-      source.SupportsTranscoding
-    ));
+    const candidate = sources.find(source => supportsMode(source, mode));
     if (!candidate) continue;
     return {
       mode,

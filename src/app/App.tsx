@@ -8,6 +8,7 @@ import { PTV_PRODUCTION_SERVER_URL } from '../config/server';
 import { toPtvError } from '../core/errors';
 import { GlobalRemoteInput } from '../focus/GlobalRemoteInput';
 import { createHomeCacheSessionKey, synchronizeHomeCacheSession } from '../state/homeCache';
+import { createMediaCacheSessionKey, synchronizeMediaCacheSession } from '../state/mediaCache';
 import type { PtvError, PtvRoute, PtvServerSession, PtvUserSession } from '../types/ptv';
 
 type StartupScreen = PtvRoute['screen'];
@@ -38,10 +39,16 @@ function setRouteSafe(dispatch: Dispatch<AppAction>, screen: StartupScreen) {
 function routeFallback(route: PtvRoute) {
   if (route.screen === 'auth') return 'auth-username';
   if (route.screen === 'server') return 'server-url';
-  if (route.screen === 'quick-connect') return 'qc-back';
-  if (route.screen === 'details') return 'details-play';
+  if (route.screen === 'quick-connect') return 'shell-back-quick-connect';
+  if (route.screen === 'home') return 'shell-home';
+  if (route.screen === 'movies' || route.screen === 'shows' || route.screen === 'music' || route.screen === 'reading') {
+    return 'browse-filter-recent';
+  }
+  if (route.screen === 'search') return 'search-query';
+  if (route.screen === 'details') return 'details-primary';
   if (route.screen === 'playback') return 'playback-toggle';
-  if (route.screen === 'settings') return 'settings-diagnostics';
+  if (route.screen === 'settings') return 'settings-category-server';
+  if (route.screen === 'diagnostics') return 'diagnostics-tab-app';
   return null;
 }
 
@@ -62,11 +69,30 @@ function diagnosticIdSuffix(value?: string | null) {
 function StartupCoordinator() {
   const { state, dispatch, services } = useApp();
   const bootstrapRun = useRef(0);
+  const previousMediaCacheSessionKey = useRef<string | null | undefined>(undefined);
   const homeCacheSessionKey = createHomeCacheSessionKey(state.serverUrl, state.userSession);
+  const mediaCacheSessionKey = createMediaCacheSessionKey(state.serverUrl, state.userSession);
 
   useEffect(() => {
     synchronizeHomeCacheSession(homeCacheSessionKey);
-  }, [homeCacheSessionKey]);
+    services.diagnostics.synchronizeHomePerformanceSession(homeCacheSessionKey);
+  }, [homeCacheSessionKey, services.diagnostics]);
+
+  useEffect(() => {
+    if (
+      previousMediaCacheSessionKey.current !== undefined &&
+      previousMediaCacheSessionKey.current !== mediaCacheSessionKey
+    ) {
+      services.focusManager.clearRouteFocus();
+    }
+    previousMediaCacheSessionKey.current = mediaCacheSessionKey;
+    synchronizeMediaCacheSession(mediaCacheSessionKey);
+  }, [mediaCacheSessionKey, services.focusManager]);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('ptv-reduced-motion', state.settings.reducedMotion);
+    return () => document.documentElement.classList.remove('ptv-reduced-motion');
+  }, [state.settings.reducedMotion]);
 
   useEffect(() => {
     const routeId = toRouteString(state.route);
@@ -74,7 +100,9 @@ function StartupCoordinator() {
     services.focusManager.setActiveRoute(routeId, {
       restore: true,
       fallbackFocusId: routeFallback(state.route),
-      focusFirstIfUnremembered: true
+      // Details content arrives asynchronously. Keep its requested primary target
+      // pending instead of prematurely settling on the first shell control.
+      focusFirstIfUnremembered: state.route.screen !== 'details'
     });
   }, [services.focusManager, state.route]);
 
@@ -391,6 +419,17 @@ function StartupCoordinator() {
       dispatch({ type: 'reset_route', route: buildRoute('server') });
       return;
     }
+    if (
+      state.route.screen === 'movies' ||
+      state.route.screen === 'shows' ||
+      state.route.screen === 'music' ||
+      state.route.screen === 'reading' ||
+      state.route.screen === 'search'
+    ) {
+      recordBack('primary-to-home', 'home');
+      dispatch({ type: 'reset_route', route: buildRoute('home') });
+      return;
+    }
     if (state.route.screen === 'server' || state.route.screen === 'home') {
       recordBack('exit-requested', null);
       window.close();
@@ -403,6 +442,7 @@ function StartupCoordinator() {
     <>
       <GlobalRemoteInput
         focusManager={services.focusManager}
+        allowDirectionalRepeat
         getRouteId={() => toRouteString(state.route)}
         onBack={handleBack}
         onOwnershipConflict={() => services.diagnostics.recordInputEvent({

@@ -27,6 +27,9 @@ export interface GlobalRemoteInputOptions {
   getRouteId?: () => string | null;
   shouldHandle?: (event: KeyboardEvent, action: RemoteInputAction) => boolean;
   allowDirectionalRepeat?: boolean;
+  repeatInitialDelayMs?: number;
+  repeatIntervalMs?: number;
+  now?: () => number;
   target?: Window;
 }
 
@@ -95,6 +98,7 @@ export function normalizeRemoteInput(
 export class GlobalRemoteInputController {
   private options: GlobalRemoteInputOptions;
   private attachedTarget: Window | null = null;
+  private directionalHold: { key: string; startedAt: number; lastHandledAt: number } | null = null;
 
   public constructor(options: GlobalRemoteInputOptions) {
     this.options = options;
@@ -132,6 +136,7 @@ export class GlobalRemoteInputController {
       owners.delete(target);
     }
     this.attachedTarget = null;
+    this.directionalHold = null;
   }
 
   public get isStarted() {
@@ -145,8 +150,9 @@ export class GlobalRemoteInputController {
     const routeId = this.options.getRouteId?.() ?? this.options.focusManager.activeRoute;
     const previousFocusId = this.options.focusManager.focusId;
     const keyCode = numericKeyCode(event);
+    const now = this.options.now?.() ?? Date.now();
     const baseRecord = {
-      timestamp: Date.now(),
+      timestamp: now,
       action,
       keyCode,
       repeat: event.repeat,
@@ -165,7 +171,24 @@ export class GlobalRemoteInputController {
       return;
     }
 
-    const repeatedDirection = action.kind === 'move' && this.options.allowDirectionalRepeat === true;
+    let repeatedDirection = false;
+    if (action.kind === 'move' && !event.repeat) {
+      this.directionalHold = { key: action.key, startedAt: now, lastHandledAt: now };
+    } else if (action.kind === 'move' && event.repeat && this.options.allowDirectionalRepeat === true) {
+      const initialDelay = Math.max(100, this.options.repeatInitialDelayMs ?? 360);
+      const interval = Math.max(80, this.options.repeatIntervalMs ?? 140);
+      const hold = this.directionalHold;
+      repeatedDirection = Boolean(
+        hold &&
+        hold.key === action.key &&
+        now - hold.startedAt >= initialDelay &&
+        now - hold.lastHandledAt >= interval
+      );
+      if (repeatedDirection && hold) hold.lastHandledAt = now;
+    } else if (action.kind !== 'move') {
+      this.directionalHold = null;
+    }
+
     if (event.repeat && !repeatedDirection) {
       this.consume(event);
       this.options.onInput?.({

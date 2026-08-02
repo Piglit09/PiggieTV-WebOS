@@ -2,18 +2,31 @@
 
 const fs = require('fs');
 const path = require('path');
-const { requireDeviceAlias, requireHostIp, runWebOsCli } = require('./webos-common.cjs');
+const {
+  copyValidatedBuildAssets,
+  readAppInfo,
+  requireDeviceAlias,
+  requireHostIp,
+  runWebOsCli
+} = require('./webos-common.cjs');
 
 function stageHostedBuild(root = process.cwd()) {
   const distDir = path.resolve(root, 'dist');
   const hostedDir = path.resolve(distDir, '.ptv-webos-hosted');
+  const appInfo = readAppInfo(root);
+  const iconNames = [...new Set([appInfo.icon, appInfo.largeIcon].filter(Boolean))];
   if (path.dirname(hostedDir) !== distDir) {
     throw new Error('Hosted staging directory resolved outside dist.');
+  }
+  if (!iconNames.length || iconNames.some(iconName => (
+    typeof iconName !== 'string' || path.basename(iconName) !== iconName || !/^[A-Za-z0-9._-]+\.png$/i.test(iconName)
+  ))) {
+    throw new Error('appinfo.json must name safe local PNG icon files.');
   }
 
   const required = [
     path.join(root, 'appinfo.json'),
-    path.join(root, 'icon.png'),
+    ...iconNames.map(iconName => path.join(root, iconName)),
     path.join(root, 'build', 'index.html'),
     path.join(root, 'build', 'assets')
   ];
@@ -26,9 +39,11 @@ function stageHostedBuild(root = process.cwd()) {
   if (fs.existsSync(hostedDir)) fs.rmSync(hostedDir, { recursive: true, force: true });
   fs.mkdirSync(hostedDir, { recursive: true });
   fs.copyFileSync(path.join(root, 'appinfo.json'), path.join(hostedDir, 'appinfo.json'));
-  fs.copyFileSync(path.join(root, 'icon.png'), path.join(hostedDir, 'icon.png'));
+  for (const iconName of iconNames) {
+    fs.copyFileSync(path.join(root, iconName), path.join(hostedDir, iconName));
+  }
   fs.copyFileSync(path.join(root, 'build', 'index.html'), path.join(hostedDir, 'index.html'));
-  fs.cpSync(path.join(root, 'build', 'assets'), path.join(hostedDir, 'assets'), { recursive: true });
+  copyValidatedBuildAssets(path.join(root, 'build', 'assets'), path.join(hostedDir, 'assets'));
   return hostedDir;
 }
 

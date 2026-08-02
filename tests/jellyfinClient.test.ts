@@ -8,7 +8,7 @@ vi.mock('../src/api/http/http', () => ({
   requestJson
 }));
 
-import { JellyfinApiClient } from '../src/api/jellyfin/client';
+import { JellyfinApiClient, resolvePlaybackStreamUrl } from '../src/api/jellyfin/client';
 
 function createClient() {
   return new JellyfinApiClient({
@@ -95,22 +95,22 @@ describe('JellyfinApiClient server identity compatibility', () => {
 
     expect(requestJson.mock.calls[0]?.[1]).toMatchObject({
       query: {
-        Fields: 'ImageTags,UserData,SeriesName',
+        Fields: expect.stringContaining('BackdropImageTags'),
         EnableUserData: true,
         EnableTotalRecordCount: false
       }
     });
     expect(requestJson.mock.calls[1]?.[1]).toMatchObject({
       query: {
-        Fields: 'ImageTags,UserData,SeriesName',
+        Fields: expect.stringContaining('BackdropImageTags'),
         EnableUserData: true,
         EnableTotalRecordCount: false
       }
     });
     expect(requestJson.mock.calls[2]?.[1]).toMatchObject({
       query: {
-        Fields: 'ImageTags',
-        EnableUserData: false,
+        Fields: expect.stringContaining('BackdropImageTags'),
+        EnableUserData: true,
         EnableTotalRecordCount: false
       }
     });
@@ -146,5 +146,82 @@ describe('JellyfinApiClient server identity compatibility', () => {
     expect(cardUrl.searchParams.get('quality')).toBe('80');
     expect(detailUrl.searchParams.get('maxWidth')).toBe('900');
     expect(detailUrl.searchParams.get('quality')).toBe('90');
+  });
+
+  it('keeps the generated stream fallback for direct play', () => {
+    const url = new URL(resolvePlaybackStreamUrl(
+      'https://piggietv.com',
+      'item-1',
+      { Id: 'source-1', Container: 'mp4' },
+      'direct-play',
+      'test-token',
+      'device-test'
+    ));
+
+    expect(url.pathname).toBe('/Videos/item-1/stream');
+    expect(url.searchParams.get('mediaSourceId')).toBe('source-1');
+    expect(url.searchParams.get('static')).toBe('true');
+    expect(url.searchParams.get('container')).toBe('mp4');
+  });
+
+  it('preserves valid supplied direct-stream and transcode URLs', () => {
+    const directStream = new URL(resolvePlaybackStreamUrl(
+      'https://piggietv.com',
+      'item-1',
+      { Id: 'source-1', DirectStreamUrl: ' /Videos/item-1/stream?mediaSourceId=source-1 ' },
+      'direct-stream',
+      'test-token',
+      'device-test'
+    ));
+    const transcode = new URL(resolvePlaybackStreamUrl(
+      'https://piggietv.com',
+      'item-1',
+      { Id: 'source-1', TranscodingUrl: 'https://media.example.test/Videos/item-1/master.m3u8' },
+      'transcode',
+      'test-token',
+      'device-test'
+    ));
+
+    expect(directStream.origin).toBe('https://piggietv.com');
+    expect(directStream.pathname).toBe('/Videos/item-1/stream');
+    expect(directStream.searchParams.get('api_key')).toBe('test-token');
+    expect(directStream.searchParams.get('deviceId')).toBe('device-test');
+    expect(transcode.origin).toBe('https://media.example.test');
+    expect(transcode.pathname).toBe('/Videos/item-1/master.m3u8');
+    expect(transcode.searchParams.get('api_key')).toBe('test-token');
+    expect(transcode.searchParams.get('deviceId')).toBe('device-test');
+  });
+
+  it('rejects missing non-direct URLs without exposing request identifiers', () => {
+    const directStream = () => resolvePlaybackStreamUrl(
+      'https://piggietv.com',
+      'private-item',
+      { Id: 'private-source' },
+      'direct-stream',
+      'private-token',
+      'private-device'
+    );
+    const transcode = () => resolvePlaybackStreamUrl(
+      'https://piggietv.com',
+      'private-item',
+      { Id: 'private-source', TranscodingUrl: '   ' },
+      'transcode',
+      'private-token',
+      'private-device'
+    );
+
+    expect(directStream).toThrow('Jellyfin did not provide a usable direct-stream URL');
+    expect(transcode).toThrow('Jellyfin did not provide a usable transcode URL');
+    for (const invoke of [directStream, transcode]) {
+      try {
+        invoke();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        expect(message).not.toContain('private-item');
+        expect(message).not.toContain('private-source');
+        expect(message).not.toContain('private-token');
+        expect(message).not.toContain('private-device');
+      }
+    }
   });
 });

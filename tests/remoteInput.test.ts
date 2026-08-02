@@ -120,6 +120,46 @@ describe('remote input', () => {
     controller.stop();
   });
 
+  it('allows directional holds only after a delay and at a controlled interval', () => {
+    const manager = new FocusManager();
+    const first = createNode('first', 0);
+    const second = createNode('second', 120);
+    const third = createNode('third', 240);
+    const fourth = createNode('fourth', 360);
+    manager.register({ id: 'first', ref: first });
+    manager.register({ id: 'second', ref: second });
+    manager.register({ id: 'third', ref: third });
+    manager.register({ id: 'fourth', ref: fourth });
+    let now = 0;
+    const records: RemoteInputRecord[] = [];
+    const controller = new GlobalRemoteInputController({
+      focusManager: manager,
+      allowDirectionalRepeat: true,
+      repeatInitialDelayMs: 300,
+      repeatIntervalMs: 120,
+      now: () => now,
+      onInput: record => records.push(record)
+    });
+    controller.start();
+
+    window.dispatchEvent(keyboardEvent('ArrowRight', 39));
+    expect(manager.focusId).toBe('second');
+    now = 180;
+    window.dispatchEvent(keyboardEvent('ArrowRight', 39, true));
+    expect(manager.focusId).toBe('second');
+    expect(records.at(-1)?.reason).toBe('repeat-ignored');
+    now = 320;
+    window.dispatchEvent(keyboardEvent('ArrowRight', 39, true));
+    expect(manager.focusId).toBe('third');
+    now = 380;
+    window.dispatchEvent(keyboardEvent('ArrowRight', 39, true));
+    expect(manager.focusId).toBe('third');
+    now = 450;
+    window.dispatchEvent(keyboardEvent('ArrowRight', 39, true));
+    expect(manager.focusId).toBe('fourth');
+    controller.stop();
+  });
+
   it('routes webOS Back once and prevents native history handling', () => {
     const manager = new FocusManager();
     const onBack = vi.fn();

@@ -1,6 +1,6 @@
 import type { PtvItem, PtvUserSession } from '../types/ptv';
 
-export type HomeSectionId = 'continue' | 'nextup' | 'movies' | 'shows' | 'recent';
+export type HomeSectionId = 'continue' | 'nextup' | 'movies' | 'shows';
 
 interface CachedHomeSection {
   expiresAt: number;

@@ -7,6 +7,7 @@ import {
   readHomeCacheSection,
   writeHomeCacheSection
 } from '../../src/state/homeCache';
+import { clearMediaCache } from '../../src/state/mediaCache';
 import { defaultStorageState, STORAGE_KEY } from '../../src/storage/sessionStore';
 
 type Deferred<T> = {
@@ -26,6 +27,9 @@ const mockGetNextUp = vi.fn();
 const mockGetRecentlyAdded = vi.fn();
 const mockGetItems = vi.fn();
 const mockGetItem = vi.fn();
+const mockGetSeasons = vi.fn();
+const mockGetEpisodes = vi.fn();
+const mockGetSearch = vi.fn();
 const mockGetPlaybackInfo = vi.fn();
 const mockReportPlaying = vi.fn();
 const mockReportProgress = vi.fn();
@@ -56,6 +60,9 @@ vi.mock('../../src/api/jellyfin/client', () => ({
       getRecentlyAdded: (...args: unknown[]) => mockGetRecentlyAdded(...args),
       getItems: (...args: unknown[]) => mockGetItems(...args),
       getItem: (...args: unknown[]) => mockGetItem(...args),
+      getSeasons: (...args: unknown[]) => mockGetSeasons(...args),
+      getEpisodes: (...args: unknown[]) => mockGetEpisodes(...args),
+      getSearch: (...args: unknown[]) => mockGetSearch(...args),
       getPlaybackInfo: (...args: unknown[]) => mockGetPlaybackInfo(...args),
       reportPlaying: (...args: unknown[]) => mockReportPlaying(...args),
       reportProgress: (...args: unknown[]) => mockReportProgress(...args),
@@ -114,6 +121,19 @@ async function waitForAuth() {
   return screen.findByRole('button', { name: /^sign in$/i });
 }
 
+async function openDiagnostics() {
+  fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+  fireEvent.click(await screen.findByRole('button', { name: /^Diagnostics/ }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Open diagnostics' }));
+  await screen.findByRole('heading', { name: 'Diagnostics' });
+}
+
+async function signOutFromSettings() {
+  fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+  fireEvent.click(await screen.findByRole('button', { name: /End this TV session/ }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Sign out of PTV' }));
+}
+
 beforeEach(() => {
   vi.useRealTimers();
   localStorage.clear();
@@ -131,6 +151,9 @@ beforeEach(() => {
     mockGetRecentlyAdded,
     mockGetItems,
     mockGetItem,
+    mockGetSeasons,
+    mockGetEpisodes,
+    mockGetSearch,
     mockGetPlaybackInfo,
     mockReportPlaying,
     mockReportProgress,
@@ -167,6 +190,9 @@ beforeEach(() => {
   mockGetRecentlyAdded.mockResolvedValue({ Items: [] });
   mockGetItems.mockResolvedValue({ Items: [] });
   mockGetItem.mockResolvedValue({ Id: 'movie-1', Name: 'Featured Movie', Type: 'Movie', Overview: 'Overview' });
+  mockGetSeasons.mockResolvedValue({ Items: [] });
+  mockGetEpisodes.mockResolvedValue({ Items: [] });
+  mockGetSearch.mockResolvedValue({ Items: [] });
   mockGetPlaybackInfo.mockResolvedValue({
     PlaySessionId: 'play-session-1',
     MediaSources: [{
@@ -186,9 +212,67 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  document.documentElement.classList.remove('ptv-reduced-motion');
   clearHomeCache();
+  clearMediaCache();
   vi.restoreAllMocks();
   vi.useRealTimers();
+});
+
+describe('integration: Phase 2 preference and Search restoration', () => {
+  it('applies and removes the reduced-motion document preference', async () => {
+    seedSession();
+    render(<App />);
+    await screen.findByRole('heading', { name: 'PiggieTV' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Appearance/ }));
+    const motion = await screen.findByRole('button', { name: /Reduced motion/ });
+    fireEvent.click(motion);
+    await waitFor(() => expect(document.documentElement.classList.contains('ptv-reduced-motion')).toBe(true));
+
+    fireEvent.click(screen.getByRole('button', { name: /Reduced motion/ }));
+    await waitFor(() => expect(document.documentElement.classList.contains('ptv-reduced-motion')).toBe(false));
+  });
+
+  it('restores Search results and the remembered result focus after Details Back', async () => {
+    seedSession();
+    const searchResponse = {
+      Items: [{ Id: 'search-movie-1', Name: 'Search Movie', Type: 'Movie', ProductionYear: 2025 }]
+    };
+    const refresh = defer<typeof searchResponse>();
+    mockGetSearch.mockResolvedValueOnce(searchResponse).mockReturnValueOnce(refresh.promise);
+    mockGetItem.mockResolvedValue({
+      Id: 'search-movie-1',
+      Name: 'Search Movie',
+      Type: 'Movie',
+      Overview: 'Search result overview'
+    });
+    render(<App />);
+    await screen.findByRole('heading', { name: 'PiggieTV' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    const input = await screen.findByPlaceholderText('Movies, shows, music, and books');
+    fireEvent.change(input, { target: { value: 'search movie' } });
+    const result = await screen.findByRole('button', { name: /Search Movie/ });
+    fireEvent.click(result);
+    await screen.findByText('Search result overview');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    const restoredInput = await screen.findByPlaceholderText('Movies, shows, music, and books');
+    expect((restoredInput as HTMLInputElement).value).toBe('search movie');
+    const restoredResult = await screen.findByRole('button', { name: /Search Movie/ });
+    await waitFor(() => {
+      expect(restoredResult.classList.contains('is-focused')).toBe(true);
+      expect(document.activeElement).toBe(restoredResult);
+    });
+    await screen.findByText('Searching…');
+    expect(screen.getByRole('button', { name: /Search Movie/ })).toBe(restoredResult);
+    expect(document.querySelector('.ptv-search__status')?.contains(screen.getByText('Searching…'))).toBe(true);
+
+    await act(async () => refresh.resolve(searchResponse));
+    await waitFor(() => expect(screen.queryByText('Searching…')).toBeNull());
+  });
 });
 
 describe('integration: startup and canonical session restore', () => {
@@ -196,7 +280,7 @@ describe('integration: startup and canonical session restore', () => {
     render(<App />);
     await waitForAuth();
     expect(mockValidateServer).toHaveBeenCalledTimes(1);
-    expect(screen.getByText('Not signed in')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Sign in to PTV' })).toBeTruthy();
     expect(screen.queryByText('Guest')).toBeNull();
   });
 
@@ -215,45 +299,29 @@ describe('integration: startup and canonical session restore', () => {
     const nextUp = defer<{ Items: [] }>();
     const movies = defer<{ Items: [] }>();
     const shows = defer<{ Items: [] }>();
-    const recent = defer<{ Items: [] }>();
     mockGetResume.mockReturnValueOnce(resume.promise);
     mockGetNextUp.mockReturnValueOnce(nextUp.promise);
-    mockGetItems
+    mockGetRecentlyAdded
       .mockReturnValueOnce(movies.promise)
       .mockReturnValueOnce(shows.promise);
-    mockGetRecentlyAdded.mockReturnValueOnce(recent.promise);
     seedSession();
     render(<App />);
 
     await waitFor(() => {
       expect(mockGetResume).toHaveBeenCalledTimes(1);
       expect(mockGetNextUp).toHaveBeenCalledTimes(1);
-      expect(mockGetItems).toHaveBeenCalledTimes(1);
+      expect(mockGetRecentlyAdded).toHaveBeenCalledTimes(1);
     });
-    expect(mockGetRecentlyAdded).not.toHaveBeenCalled();
-    expect(mockGetItems.mock.calls[0]?.[1]).toMatchObject({
-      IncludeItemTypes: 'Movie',
-      Fields: 'ImageTags',
-      EnableUserData: false,
-      EnableTotalRecordCount: false
-    });
+    expect(mockGetRecentlyAdded.mock.calls[0]?.[1]).toBe('Movie');
 
     await act(async () => movies.resolve({ Items: [] }));
-    await waitFor(() => expect(mockGetItems).toHaveBeenCalledTimes(2));
-    expect(mockGetItems.mock.calls[1]?.[1]).toMatchObject({
-      IncludeItemTypes: 'Series',
-      Fields: 'ImageTags',
-      EnableUserData: false,
-      EnableTotalRecordCount: false
-    });
-    expect(mockGetRecentlyAdded).not.toHaveBeenCalled();
+    await waitFor(() => expect(mockGetRecentlyAdded).toHaveBeenCalledTimes(2));
+    expect(mockGetRecentlyAdded.mock.calls[1]?.[1]).toBe('Series');
 
     await act(async () => shows.resolve({ Items: [] }));
-    await waitFor(() => expect(mockGetRecentlyAdded).toHaveBeenCalledTimes(1));
     await act(async () => {
       resume.resolve({ Items: [] });
       nextUp.resolve({ Items: [] });
-      recent.resolve({ Items: [] });
     });
   });
 
@@ -262,12 +330,20 @@ describe('integration: startup and canonical session restore', () => {
       kind: 'http-server-error',
       message: 'Failure at https://server.example.com/Items/private-item?api_key=home-row-secret'
     });
+    mockGetRecentlyAdded.mockImplementation((_userId: string, itemType: string) => Promise.resolve({
+      Items: itemType === 'Movie'
+        ? [{ Id: 'safe-movie', Name: 'Successful shelf movie', Type: 'Movie' }]
+        : []
+    }));
     seedSession();
     render(<App />);
 
     await waitFor(() => expect(document.body.textContent).toContain('***redacted***'));
+    const successfulCard = await screen.findByRole('button', { name: 'Successful shelf movie' });
     expect(document.body.textContent).not.toContain('home-row-secret');
     expect(document.body.textContent).not.toContain('/Items/private-item');
+    expect(successfulCard.closest('.ptv-card')?.classList.contains('ptv-card--poster')).toBe(true);
+    expect(successfulCard.querySelector('.ptv-card-placeholder')).toBeTruthy();
   });
 
   it('clears a stored token rejected by Jellyfin and returns to sign-in', async () => {
@@ -378,7 +454,7 @@ describe('integration: password authentication ownership', () => {
 
     first.resolve({ User: { Id: 'old', Name: 'Old' }, AccessToken: 'old-token', ServerId: 'server-demo' });
     await act(async () => { await Promise.resolve(); });
-    expect(screen.queryByRole('heading', { name: 'PiggieTV' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Home' })).toBeNull();
 
     second.resolve({ User: { Id: 'new', Name: 'New' }, AccessToken: 'newest-token', ServerId: 'server-demo' });
     await screen.findByRole('heading', { name: 'PiggieTV' });
@@ -410,13 +486,145 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
     const card = await screen.findByRole('button', { name: 'Featured Movie' });
     fireEvent.click(card);
     await screen.findByText('Overview');
+    const detailsPlay = screen.getByRole('button', { name: /^play$/i });
+    await waitFor(() => expect(document.activeElement).toBe(detailsPlay));
+    expect(screen.getAllByRole('button', { name: 'Back' })).toHaveLength(1);
+    expect(document.querySelector('.ptv-details__backdrop--fallback')).toBeTruthy();
     mockGetResume.mockReturnValueOnce(refresh.promise);
-    fireEvent.click(screen.getByRole('button', { name: '← Back' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
 
     const restored = screen.getByRole('button', { name: 'Featured Movie' });
     await waitFor(() => expect(mockGetResume).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(document.activeElement).toBe(restored));
     await act(async () => refresh.resolve({ Items: [{ Id: 'movie-1', Name: 'Featured Movie', Type: 'Movie' }] }));
+  });
+
+  it('loads only the selected Series season and starts playback with the episode ID', async () => {
+    const load = vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+    seedSession();
+    mockGetRecentlyAdded.mockImplementation((_userId: string, itemType: string) => Promise.resolve({
+      Items: itemType === 'Series'
+        ? [{ Id: 'series-1', Name: 'The PTV Show', Type: 'Series' }]
+        : []
+    }));
+    mockGetItem.mockResolvedValue({
+      Id: 'series-1',
+      Name: 'The PTV Show',
+      Type: 'Series',
+      Overview: 'A series overview.'
+    });
+    mockGetSeasons.mockResolvedValue({
+      Items: [
+        { Id: 'season-1', Name: 'Season 1', Type: 'Season' },
+        { Id: 'season-2', Name: 'Season 2', Type: 'Season' }
+      ]
+    });
+    mockGetEpisodes.mockImplementation((_userId: string, _seriesId: string, seasonId: string) => Promise.resolve({
+      Items: seasonId === 'season-2'
+        ? Array.from({ length: 9 }, (_, index) => ({
+            Id: `episode-${index + 2}`,
+            Name: index === 0
+              ? 'Second Season Premiere'
+              : index === 8
+                ? 'Second Season Finale'
+                : `Second Season Episode ${index + 1}`,
+            Type: 'Episode',
+            SeriesName: 'The PTV Show',
+            ParentIndexNumber: 2,
+            IndexNumber: index + 1,
+            RunTimeTicks: 2_700_000_000
+          }))
+        : [{
+            Id: 'episode-1',
+            Name: 'Pilot',
+            Type: 'Episode',
+            SeriesName: 'The PTV Show',
+            ParentIndexNumber: 1,
+            IndexNumber: 1,
+            RunTimeTicks: 2_700_000_000
+          }]
+    }));
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'The PTV Show' }));
+    await screen.findByRole('button', { name: 'Season 1' });
+    await screen.findByRole('button', { name: /^Pilot,/ });
+
+    expect(mockGetPlaybackInfo).not.toHaveBeenCalled();
+    expect(mockGetSeasons).toHaveBeenCalledWith('user-1', 'series-1', expect.any(AbortSignal));
+    expect(mockGetEpisodes).toHaveBeenCalledWith('user-1', 'series-1', 'season-1', expect.any(AbortSignal));
+    expect(mockGetEpisodes).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Season 2' }));
+    const episode = await screen.findByRole('button', { name: /^Second Season Premiere,/ });
+    expect(mockGetEpisodes).toHaveBeenLastCalledWith('user-1', 'series-1', 'season-2', expect.any(AbortSignal));
+    expect(mockGetEpisodes).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(document.activeElement).toBe(episode));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    const finale = await screen.findByRole('button', { name: /^Second Season Finale,/ });
+    await waitFor(() => expect(document.activeElement).toBe(finale));
+    expect(document.querySelectorAll('.ptv-episode-grid .ptv-card-btn')).toHaveLength(1);
+
+    fireEvent.click(finale);
+    await waitFor(() => expect(mockGetPlaybackInfo).toHaveBeenCalledTimes(1));
+    expect(mockGetPlaybackInfo.mock.calls[0]?.[1]).toBe('episode-10');
+    expect(document.querySelectorAll('video')).toHaveLength(1);
+
+    fireEvent.keyDown(window, { key: 'GoBack', keyCode: 461, which: 461 });
+    const restoredEpisode = await screen.findByRole('button', { name: /^Second Season Finale,/ });
+    expect(screen.getByText('2 / 2')).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(restoredEpisode));
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('pages Movies in bounded sets of 16 and restores the selected page/card after Details', async () => {
+    const firstPage = Array.from({ length: 16 }, (_, index) => ({
+      Id: `movie-${index + 1}`,
+      Name: `Library Movie ${index + 1}`,
+      Type: 'Movie',
+      ProductionYear: 2026
+    }));
+    seedSession();
+    mockGetItems
+      .mockResolvedValueOnce({ Items: firstPage, TotalRecordCount: 17 })
+      .mockResolvedValueOnce({
+        Items: [{ Id: 'movie-17', Name: 'Library Movie 17', Type: 'Movie', ProductionYear: 2026 }],
+        TotalRecordCount: 17
+      });
+    mockGetItem.mockResolvedValue({
+      Id: 'movie-17',
+      Name: 'Library Movie 17',
+      Type: 'Movie',
+      Overview: 'Last movie on the next page.'
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Movies' }));
+    await screen.findByRole('button', { name: 'Library Movie 16, 2026' });
+    expect(mockGetItems.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+      IncludeItemTypes: 'Movie',
+      StartIndex: 0,
+      Limit: 16,
+      SortBy: 'DateCreated'
+    }));
+    expect(document.querySelectorAll('.ptv-poster-grid .ptv-card-btn')).toHaveLength(16);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    const finalCard = await screen.findByRole('button', { name: 'Library Movie 17, 2026' });
+    expect(mockGetItems.mock.calls[1]?.[1]).toEqual(expect.objectContaining({ StartIndex: 16, Limit: 16 }));
+    expect(document.querySelectorAll('.ptv-poster-grid .ptv-card-btn')).toHaveLength(1);
+
+    fireEvent.click(finalCard);
+    await screen.findByText('Last movie on the next page.');
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+
+    const restoredCard = await screen.findByRole('button', { name: 'Library Movie 17, 2026' });
+    expect(screen.getByText('Page 2')).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(restoredCard));
+    expect(mockGetItems).toHaveBeenCalledTimes(2);
   });
 
   it('does not cache a Home response that resolves after the route unmounts', async () => {
@@ -426,12 +634,11 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
     render(<App />);
 
     await screen.findByRole('heading', { name: 'PiggieTV' });
-    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
-    await screen.findByRole('heading', { name: 'Application' });
+    await openDiagnostics();
     await act(async () => lateResume.resolve({
       Items: [{ Id: 'late-item', Name: 'Late private item', Type: 'Movie' }]
     }));
-    fireEvent.click(screen.getByRole('button', { name: '← Back' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
 
     await screen.findByRole('heading', { name: 'PiggieTV' });
     expect(screen.queryByRole('button', { name: 'Late private item' })).toBeNull();
@@ -509,11 +716,9 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
     seedSession();
     render(<App />);
     await screen.findByRole('heading', { name: 'PiggieTV' });
-    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
-    await screen.findByRole('heading', { name: 'Application' });
-
-    fireEvent.click(screen.getByRole('button', { name: 'Next section' }));
-    await screen.findByRole('heading', { name: 'Authentication and session restore' });
+    await openDiagnostics();
+    fireEvent.click(screen.getByRole('button', { name: 'Session' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Raw JSON' }));
     await waitFor(() => {
       const output = document.querySelector('.ptv-diagnostics__output')?.textContent ?? '';
       expect(output).toContain('"sessionPresent": true');
@@ -522,10 +727,8 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
       expect(output).not.toContain('stored-token');
     });
 
-    for (let page = 0; page < 3; page += 1) {
-      fireEvent.click(screen.getByRole('button', { name: 'Next section' }));
-    }
-    await screen.findByRole('heading', { name: 'Lifecycle and errors' });
+    fireEvent.click(screen.getByRole('button', { name: 'Lifecycle' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Raw JSON' }));
     await waitFor(() => {
       const output = document.querySelector('.ptv-diagnostics__output')?.textContent ?? '';
       expect(output).toContain('"listenerOwnerCount": 1');
@@ -534,15 +737,12 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: /^Back$/i }));
-    await screen.findByRole('heading', { name: 'PiggieTV' });
-    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Sign out' }));
+    await screen.findByRole('heading', { name: 'Settings' });
+    await signOutFromSettings();
     await waitForAuth();
-    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Open diagnostics' }));
-    await screen.findByRole('heading', { name: 'Application' });
-    fireEvent.click(screen.getByRole('button', { name: 'Next section' }));
-    await screen.findByRole('heading', { name: 'Authentication and session restore' });
+    await openDiagnostics();
+    fireEvent.click(screen.getByRole('button', { name: 'Session' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Raw JSON' }));
     await waitFor(() => {
       const output = document.querySelector('.ptv-diagnostics__output')?.textContent ?? '';
       expect(output).toContain('"sessionPresent": false');
@@ -587,15 +787,14 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
       name: 'Private item',
       type: 'Movie'
     }]);
-    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Sign out' }));
+    await signOutFromSettings();
 
     await waitForAuth();
     await waitFor(() => expect(readHomeCacheSection('sign-out-sentinel', 'movies')).toBeUndefined());
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as { session?: unknown };
     expect(stored.session).toBeNull();
     expect(mockSetAccessToken).toHaveBeenLastCalledWith(undefined);
-    expect(screen.queryByRole('button', { name: '← Back' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
   });
 
   it('normalizes a changed private server before configuring the shared client', async () => {

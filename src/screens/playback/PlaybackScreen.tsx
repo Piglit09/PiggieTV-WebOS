@@ -166,6 +166,14 @@ export function PlaybackScreen() {
             ?? source.MediaStreams?.find(stream => stream.Type === 'Audio');
           const sourceVideoCodec = source.VideoCodec ?? sourceVideoStream?.Codec ?? null;
           const sourceAudioCodec = source.AudioCodec ?? sourceAudioStream?.Codec ?? null;
+          const streamUrl = resolvePlaybackStreamUrl(
+            runtime.serverUrl,
+            request.itemId,
+            source,
+            decision.mode,
+            runtime.accessToken,
+            runtime.deviceId
+          );
           const reportingClient = new JellyfinApiClient({
             baseUrl: runtime.serverUrl,
             accessToken: runtime.accessToken,
@@ -181,14 +189,6 @@ export function PlaybackScreen() {
             if (!oldestAttemptId) break;
             reportingRuntimeByAttemptRef.current.delete(oldestAttemptId);
           }
-          const streamUrl = resolvePlaybackStreamUrl(
-            runtime.serverUrl,
-            request.itemId,
-            source,
-            decision.mode,
-            runtime.accessToken,
-            runtime.deviceId
-          );
           const transcodingRequested = decision.mode === 'transcode';
           return {
             url: streamUrl,
@@ -360,46 +360,62 @@ export function PlaybackScreen() {
     ? Math.max(0, Math.min(100, (snapshot.currentTime / snapshot.duration) * 100))
     : 0;
   const loading = playerState === 'idle' || playerState === 'resolving' || playerState === 'loading' || playerState === 'ready';
+  const playbackTitle = intent.title?.trim() || 'Now Playing';
+  const playbackContext = intent.context?.trim();
 
   return (
     <section className="ptv-playback-route" onMouseMove={showControls} onClick={showControls}>
       <video ref={videoRef} playsInline />
       {loading && !error ? <div className="ptv-playback__status">Preparing video…</div> : null}
       {error ? <div className="ptv-playback__error">{error}</div> : null}
-      <div className={`ptv-playback__controls ${controlsVisible ? '' : 'is-hidden'}`} aria-hidden={!controlsVisible}>
-        <FocusableButton
-          focusId="playback-toggle"
-          onClick={() => {
-            showControls();
-            if (playerStateRef.current === 'ended' || playerStateRef.current === 'error') return;
-            if (snapshot.paused) void engineRef.current?.play();
-            else engineRef.current?.pause();
-          }}
-          disabled={loading || playerState === 'ended' || Boolean(error)}
-        >
-          {playerState === 'ended' ? 'Ended' : snapshot.paused ? 'Play' : 'Pause'}
-        </FocusableButton>
-        <FocusableButton
-          focusId="playback-rewind"
-          onClick={() => engineRef.current?.seek(snapshot.currentTime - 30)}
-          disabled={!snapshot.canSeek || playerState === 'ended' || Boolean(error)}
-        >
-          −30s
-        </FocusableButton>
-        <FocusableButton
-          focusId="playback-forward"
-          onClick={() => engineRef.current?.seek(snapshot.currentTime + 30)}
-          disabled={!snapshot.canSeek || playerState === 'ended' || Boolean(error)}
-        >
-          +30s
-        </FocusableButton>
-        <div className="ptv-playback__progress" aria-hidden="true">
-          <div className="ptv-playback__progress-fill" style={{ width: `${progressPercent}%` }} />
+      <div className={`ptv-playback__overlay ${controlsVisible ? '' : 'is-hidden'}`} aria-hidden={!controlsVisible}>
+        <div className="ptv-playback__heading">
+          <h1 className="ptv-playback__title">{playbackTitle}</h1>
+          {playbackContext ? <p className="ptv-playback__context">{playbackContext}</p> : null}
         </div>
-        <span className="ptv-playback__time">
-          {formatMediaTime(snapshot.currentTime)} / {formatMediaDuration(snapshot.duration)}
-        </span>
-        <FocusableButton focusId="playback-close" onClick={closePlayback}>Close</FocusableButton>
+        <div className="ptv-playback__controls">
+          <FocusableButton
+            focusId="playback-toggle"
+            onClick={() => {
+              showControls();
+              if (playerStateRef.current === 'ended' || playerStateRef.current === 'error') return;
+              if (snapshot.paused) void engineRef.current?.play();
+              else engineRef.current?.pause();
+            }}
+            disabled={loading || playerState === 'ended' || Boolean(error)}
+          >
+            {playerState === 'ended' ? 'Ended' : snapshot.paused ? 'Play' : 'Pause'}
+          </FocusableButton>
+          <FocusableButton
+            focusId="playback-rewind"
+            onClick={() => engineRef.current?.seek(snapshot.currentTime - 30)}
+            disabled={!snapshot.canSeek || playerState === 'ended' || Boolean(error)}
+          >
+            −30s
+          </FocusableButton>
+          <FocusableButton
+            focusId="playback-forward"
+            onClick={() => engineRef.current?.seek(snapshot.currentTime + 30)}
+            disabled={!snapshot.canSeek || playerState === 'ended' || Boolean(error)}
+          >
+            +30s
+          </FocusableButton>
+          <div
+            className="ptv-playback__progress"
+            role="progressbar"
+            aria-label="Playback progress"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={snapshot.duration && snapshot.duration > 0 ? Math.round(progressPercent) : undefined}
+            aria-valuetext={`${formatMediaTime(snapshot.currentTime)} of ${formatMediaDuration(snapshot.duration)}`}
+          >
+            <div className="ptv-playback__progress-fill" style={{ width: `${progressPercent}%` }} />
+          </div>
+          <span className="ptv-playback__time">
+            {formatMediaTime(snapshot.currentTime)} / {formatMediaDuration(snapshot.duration)}
+          </span>
+          <FocusableButton focusId="playback-close" onClick={closePlayback}>Back</FocusableButton>
+        </div>
       </div>
     </section>
   );

@@ -1,9 +1,13 @@
 import { createRequire } from 'node:module';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
 
 const common = require('../scripts/webos-common.cjs') as {
+  copyValidatedBuildAssets: (sourceDir: string, targetDir: string) => string[];
   readDeviceAlias: (args?: string[], env?: Record<string, string>) => string | null;
   requireDeviceAlias: (args?: string[], env?: Record<string, string>) => string;
   requireHostIp: (args?: string[], env?: Record<string, string>) => string;
@@ -73,5 +77,23 @@ describe('webOS helper safety', () => {
     expect(() => common.runWebOsCli('cmd.exe', ['/c', 'whoami'])).toThrow(
       'Unsupported webOS CLI command'
     );
+  });
+
+  it('stages only top-level JavaScript build assets', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ptv-assets-'));
+    try {
+      const source = join(root, 'source');
+      const target = join(root, 'target');
+      mkdirSync(source);
+      writeFileSync(join(source, 'main-legacy-ABC123.js'), 'window.__ptv = true;');
+
+      expect(common.copyValidatedBuildAssets(source, target)).toEqual(['main-legacy-ABC123.js']);
+      expect(readFileSync(join(target, 'main-legacy-ABC123.js'), 'utf8')).toContain('__ptv');
+
+      writeFileSync(join(source, 'main-legacy-ABC123.js.map'), '{}');
+      expect(() => common.copyValidatedBuildAssets(source, join(root, 'rejected'))).toThrow('unexpected assets');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
