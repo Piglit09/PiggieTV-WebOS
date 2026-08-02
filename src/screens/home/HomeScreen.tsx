@@ -5,14 +5,40 @@ import { buildRoute, toRouteString } from '../../navigation/router';
 import { canNavigateToDetails, mapPtvItems } from '../../api/jellyfin/mappers';
 import { CardTile } from '../../components/CardTile';
 import { redactSensitiveText } from '../../core/redaction';
+import {
+  createHomeCacheSessionKey,
+  readHomeCacheSection,
+  writeHomeCacheSection,
+  type HomeSectionId
+} from '../../state/homeCache';
 import type { PtvItem } from '../../types/ptv';
 
 interface HomeSectionState {
-  id: string;
+  id: HomeSectionId;
   title: string;
   items: PtvItem[];
   loading: boolean;
   error: string | null;
+}
+
+const HOME_SECTION_DEFINITIONS: ReadonlyArray<{ id: HomeSectionId; title: string }> = [
+  { id: 'continue', title: 'Continue Watching' },
+  { id: 'nextup', title: 'Next Up' },
+  { id: 'movies', title: 'Movies' },
+  { id: 'shows', title: 'Shows' },
+  { id: 'recent', title: 'Recently Added' }
+];
+
+function createHomeSections(key: string | null, refreshing: boolean): HomeSectionState[] {
+  return HOME_SECTION_DEFINITIONS.map(definition => {
+    const cachedItems = readHomeCacheSection(key, definition.id);
+    return {
+      ...definition,
+      items: cachedItems ?? [],
+      loading: refreshing || cachedItems === undefined,
+      error: null
+    };
+  });
 }
 
 function HomeShelf({
@@ -78,9 +104,10 @@ function HomeShelf({
 
 export function HomeScreen() {
   const { state, dispatch, services } = useApp();
-  const [sections, setSections] = useState<HomeSectionState[]>([]);
-  const [activeRow, setActiveRow] = useState(0);
   const userSession = state.userSession;
+  const homeCacheKey = createHomeCacheSessionKey(state.serverUrl, userSession);
+  const [sections, setSections] = useState<HomeSectionState[]>(() => createHomeSections(homeCacheKey, false));
+  const [activeRow, setActiveRow] = useState(0);
   const client = useMemo(() => {
     if (!state.serverUrl || !userSession) return null;
     return services.jellyfin.configureSession(state.serverUrl, userSession.accessToken);
@@ -96,29 +123,13 @@ export function HomeScreen() {
     return null;
   };
 
-  const headers = useMemo(
-    () => ({
-      continue: 'Continue Watching',
-      nextup: 'Next Up',
-      movies: 'Movies',
-      shows: 'Shows',
-      recent: 'Recently Added'
-    }),
-    []
-  );
-
   useEffect(() => {
-    if (!client || !userSession) return;
+    if (!client || !userSession || !homeCacheKey) return;
     let active = true;
     const controller = new AbortController();
+    const initialSections = createHomeSections(homeCacheKey, true);
 
-    setSections([
-      { id: 'continue', title: headers.continue, items: [], loading: true, error: null },
-      { id: 'nextup', title: headers.nextup, items: [], loading: true, error: null },
-      { id: 'movies', title: headers.movies, items: [], loading: true, error: null },
-      { id: 'shows', title: headers.shows, items: [], loading: true, error: null },
-      { id: 'recent', title: headers.recent, items: [], loading: true, error: null }
-    ]);
+    setSections(initialSections);
 
     const load = async (section: HomeSectionState) => {
       try {
@@ -171,16 +182,11 @@ export function HomeScreen() {
       }
 
       if (!active) return;
+      if (!section.error) writeHomeCacheSection(homeCacheKey, section.id, section.items);
       setSections(previous => previous.map(entry => (entry.id === section.id ? { ...entry, ...section } : entry)));
     };
 
-    const queue: HomeSectionState[] = [
-      { id: 'continue', title: headers.continue, items: [], loading: true, error: null },
-      { id: 'nextup', title: headers.nextup, items: [], loading: true, error: null },
-      { id: 'movies', title: headers.movies, items: [], loading: true, error: null },
-      { id: 'shows', title: headers.shows, items: [], loading: true, error: null },
-      { id: 'recent', title: headers.recent, items: [], loading: true, error: null }
-    ];
+    const queue: HomeSectionState[] = initialSections.map(section => ({ ...section }));
 
     const worker = async () => {
       while (active && !controller.signal.aborted) {
@@ -196,7 +202,7 @@ export function HomeScreen() {
       active = false;
       controller.abort('home-route-hidden');
     };
-  }, [headers, client, userSession]);
+  }, [client, homeCacheKey, userSession]);
 
   useEffect(() => {
     if (!sections.length) return;

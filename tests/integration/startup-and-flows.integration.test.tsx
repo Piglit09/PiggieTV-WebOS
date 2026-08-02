@@ -2,6 +2,11 @@ import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../../src/app/App';
+import {
+  clearHomeCache,
+  readHomeCacheSection,
+  writeHomeCacheSection
+} from '../../src/state/homeCache';
 import { defaultStorageState, STORAGE_KEY } from '../../src/storage/sessionStore';
 
 type Deferred<T> = {
@@ -181,6 +186,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  clearHomeCache();
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
@@ -397,16 +403,38 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
   });
 
   it('restores the selected Home card after Details Back', async () => {
+    const refresh = defer<{ Items: Array<{ Id: string; Name: string; Type: string }> }>();
     seedSession();
     mockGetResume.mockResolvedValue({ Items: [{ Id: 'movie-1', Name: 'Featured Movie', Type: 'Movie' }] });
     render(<App />);
     const card = await screen.findByRole('button', { name: 'Featured Movie' });
     fireEvent.click(card);
     await screen.findByText('Overview');
+    mockGetResume.mockReturnValueOnce(refresh.promise);
     fireEvent.click(screen.getByRole('button', { name: '← Back' }));
 
-    const restored = await screen.findByRole('button', { name: 'Featured Movie' });
+    const restored = screen.getByRole('button', { name: 'Featured Movie' });
+    await waitFor(() => expect(mockGetResume).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(document.activeElement).toBe(restored));
+    await act(async () => refresh.resolve({ Items: [{ Id: 'movie-1', Name: 'Featured Movie', Type: 'Movie' }] }));
+  });
+
+  it('does not cache a Home response that resolves after the route unmounts', async () => {
+    const lateResume = defer<{ Items: Array<{ Id: string; Name: string; Type: string }> }>();
+    mockGetResume.mockReturnValueOnce(lateResume.promise);
+    seedSession();
+    render(<App />);
+
+    await screen.findByRole('heading', { name: 'PiggieTV' });
+    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    await screen.findByRole('heading', { name: 'Application' });
+    await act(async () => lateResume.resolve({
+      Items: [{ Id: 'late-item', Name: 'Late private item', Type: 'Movie' }]
+    }));
+    fireEvent.click(screen.getByRole('button', { name: '← Back' }));
+
+    await screen.findByRole('heading', { name: 'PiggieTV' });
+    expect(screen.queryByRole('button', { name: 'Late private item' })).toBeNull();
   });
 
   it('uses one persistent video pipeline and restores Details focus after playback Back', async () => {
@@ -554,10 +582,16 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
     seedSession();
     render(<App />);
     await screen.findByRole('heading', { name: 'PiggieTV' });
+    writeHomeCacheSection('sign-out-sentinel', 'movies', [{
+      id: 'private-item',
+      name: 'Private item',
+      type: 'Movie'
+    }]);
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Sign out' }));
 
     await waitForAuth();
+    await waitFor(() => expect(readHomeCacheSection('sign-out-sentinel', 'movies')).toBeUndefined());
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as { session?: unknown };
     expect(stored.session).toBeNull();
     expect(mockSetAccessToken).toHaveBeenLastCalledWith(undefined);

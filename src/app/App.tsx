@@ -7,6 +7,7 @@ import { normalizeServerUrl } from '../api/jellyfin/normalizeUrl';
 import { PTV_PRODUCTION_SERVER_URL } from '../config/server';
 import { toPtvError } from '../core/errors';
 import { GlobalRemoteInput } from '../focus/GlobalRemoteInput';
+import { createHomeCacheSessionKey, synchronizeHomeCacheSession } from '../state/homeCache';
 import type { PtvError, PtvRoute, PtvServerSession, PtvUserSession } from '../types/ptv';
 
 type StartupScreen = PtvRoute['screen'];
@@ -61,6 +62,11 @@ function diagnosticIdSuffix(value?: string | null) {
 function StartupCoordinator() {
   const { state, dispatch, services } = useApp();
   const bootstrapRun = useRef(0);
+  const homeCacheSessionKey = createHomeCacheSessionKey(state.serverUrl, state.userSession);
+
+  useEffect(() => {
+    synchronizeHomeCacheSession(homeCacheSessionKey);
+  }, [homeCacheSessionKey]);
 
   useEffect(() => {
     const routeId = toRouteString(state.route);
