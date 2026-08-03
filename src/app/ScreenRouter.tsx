@@ -7,6 +7,8 @@ import { QuickConnectScreen } from '../screens/login/QuickConnectScreen';
 import { HomeScreen } from '../screens/home/HomeScreen';
 import { MoviesScreen } from '../screens/browse/MoviesScreen';
 import { ShowsScreen } from '../screens/browse/ShowsScreen';
+import { MusicScreen } from '../screens/browse/MusicScreen';
+import { ReadingScreen } from '../screens/browse/ReadingScreen';
 import { SearchScreen } from '../screens/search/SearchScreen';
 import { DetailsScreen } from '../screens/details/DetailsScreen';
 import { SettingsScreen } from '../screens/settings/SettingsScreen';
@@ -29,6 +31,10 @@ export function ScreenRouter() {
       return <MoviesScreen />;
     case 'shows':
       return <ShowsScreen />;
+    case 'music':
+      return <MusicScreen />;
+    case 'reading':
+      return <ReadingScreen />;
     case 'search':
       return <SearchScreen />;
     case 'details':

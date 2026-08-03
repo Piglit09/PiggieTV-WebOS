@@ -14,6 +14,7 @@ const WEBOS_COMMANDS = new Set([
   'ares-package',
   'ares-setup-device'
 ]);
+const SAFE_BUILD_ASSET = /^[A-Za-z0-9._-]+\.js$/;
 
 function readCliOption(args, names, label) {
   const optionIndex = args.findIndex(value => names.includes(value));
@@ -50,6 +51,9 @@ function readAppInfo(root = process.cwd()) {
   const appInfo = JSON.parse(fs.readFileSync(path.join(root, 'appinfo.json'), 'utf8'));
   if (typeof appInfo.id !== 'string' || typeof appInfo.version !== 'string') {
     throw new Error('appinfo.json is missing a valid id or version.');
+  }
+  if (appInfo.disableBackHistoryAPI !== true) {
+    throw new Error('appinfo.json must set disableBackHistoryAPI to true so webOS delivers Back events to the application.');
   }
   return {
     ...appInfo,
@@ -112,7 +116,25 @@ function runWebOsCli(command, args, options = {}) {
   return execFileSync(command, args, { ...options, windowsHide: true });
 }
 
+function copyValidatedBuildAssets(sourceDir, targetDir) {
+  const entries = fs.readdirSync(sourceDir, { withFileTypes: true });
+  if (!entries.length) {
+    throw new Error('The web build contains no JavaScript assets.');
+  }
+  const unexpected = entries.filter(entry => !entry.isFile() || !SAFE_BUILD_ASSET.test(entry.name));
+  if (unexpected.length) {
+    throw new Error(`The web build contains unexpected assets: ${unexpected.map(entry => entry.name).join(', ')}`);
+  }
+
+  fs.mkdirSync(targetDir, { recursive: true });
+  for (const entry of entries) {
+    fs.copyFileSync(path.join(sourceDir, entry.name), path.join(targetDir, entry.name));
+  }
+  return entries.map(entry => entry.name);
+}
+
 module.exports = {
+  copyValidatedBuildAssets,
   findPowerShellCliScript,
   readAppInfo,
   readCliOption,

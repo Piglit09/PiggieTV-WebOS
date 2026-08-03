@@ -263,7 +263,7 @@ export class JellyfinApiClient {
     return this.get<{ Items: Array<Record<string, unknown>> }>(`Users/${encodeURIComponent(sessionUserId)}/Items/Resume`, {
       IncludeItemTypes: itemTypes,
       Limit: limit,
-      Fields: 'ImageTags,UserData,SeriesName',
+      Fields: 'ImageTags,BackdropImageTags,UserData,SeriesName,SeasonName,Overview,ProductionYear,RunTimeTicks,OfficialRating,CommunityRating,Genres',
       EnableUserData: true,
       EnableTotalRecordCount: false
     }, undefined, signal);
@@ -275,12 +275,64 @@ export class JellyfinApiClient {
       {
         UserId: sessionUserId,
         Limit: limit,
-        Fields: 'ImageTags,UserData,SeriesName',
+        Fields: 'ImageTags,BackdropImageTags,UserData,SeriesName,SeasonName,Overview,ProductionYear,RunTimeTicks,OfficialRating,CommunityRating,Genres',
         EnableUserData: true,
         EnableTotalRecordCount: false
       },
       undefined,
       signal
+    );
+  }
+
+  public getNextUpForSeries(userId: string, seriesId: string, limit = 2, signal?: AbortSignal) {
+    return this.get<{ Items: Array<Record<string, unknown>>; TotalRecordCount?: number }>(
+      'Shows/NextUp',
+      {
+        UserId: userId,
+        SeriesId: seriesId,
+        Limit: limit,
+        Fields: 'ImageTags,BackdropImageTags,Overview,RunTimeTicks,SeriesName,SeasonName,IndexNumber,ParentIndexNumber,UserData',
+        EnableUserData: true,
+        EnableTotalRecordCount: false
+      },
+      undefined,
+      signal,
+      { requestRoute: 'GET Shows/NextUp' }
+    );
+  }
+
+  public getSeasons(sessionUserId: string, seriesId: string, signal?: AbortSignal) {
+    return this.get<{ Items: Array<Record<string, unknown>>; TotalRecordCount?: number }>(
+      `Shows/${encodeURIComponent(seriesId)}/Seasons`,
+      {
+        UserId: sessionUserId,
+        Fields: 'ImageTags,Overview,ProductionYear,PremiereDate,EndDate,Status,UserData',
+        EnableUserData: true
+      },
+      undefined,
+      signal,
+      { requestRoute: 'GET Shows/{series}/Seasons' }
+    );
+  }
+
+  public getEpisodes(
+    sessionUserId: string,
+    seriesId: string,
+    seasonId: string,
+    signal?: AbortSignal
+  ) {
+    return this.get<{ Items: Array<Record<string, unknown>>; TotalRecordCount?: number }>(
+      `Shows/${encodeURIComponent(seriesId)}/Episodes`,
+      {
+        UserId: sessionUserId,
+        SeasonId: seasonId,
+        Fields: 'ImageTags,Overview,RunTimeTicks,SeriesName,SeasonName,IndexNumber,ParentIndexNumber,UserData',
+        EnableUserData: true,
+        EnableTotalRecordCount: false
+      },
+      undefined,
+      signal,
+      { requestRoute: 'GET Shows/{series}/Episodes' }
     );
   }
 
@@ -292,9 +344,9 @@ export class JellyfinApiClient {
         SortOrder: 'Descending',
         IncludeItemTypes: includeType,
         Limit: limit,
-        Fields: 'ImageTags',
+        Fields: 'ImageTags,BackdropImageTags,Overview,ProductionYear,RunTimeTicks,OfficialRating,CommunityRating,Genres,UserData',
         Recursive: true,
-        EnableUserData: false,
+        EnableUserData: true,
         EnableTotalRecordCount: false
       },
       undefined,
@@ -309,7 +361,7 @@ export class JellyfinApiClient {
         SearchTerm: query,
         Recursive: true,
         IncludeItemTypes: include,
-        Limit: 40,
+        Limit: 16,
         Fields: 'ImageTags,ProductionYear,RunTimeTicks,SeriesName,IndexNumber,Overview,Genres',
         SortBy: 'SortName',
         SortOrder: 'Ascending'
@@ -480,19 +532,23 @@ export function resolvePlaybackStreamUrl(
       ? source.DirectStreamUrl
       : null;
 
+  if (mode !== 'direct-play' && (!suppliedPath || !suppliedPath.trim())) {
+    throw new Error(`Jellyfin did not provide a usable ${mode} URL`);
+  }
+
   if (!suppliedPath) {
     return createPlaybackStreamUrl(
       baseUrl,
       itemId,
       source.Id,
       accessToken,
-      mode === 'direct-play',
+      true,
       source.Container ?? undefined,
       deviceId
     );
   }
 
-  const url = new URL(suppliedPath, serverRoot);
+  const url = new URL(suppliedPath.trim(), serverRoot);
   if (!url.searchParams.has('api_key') && !url.searchParams.has('token')) {
     url.searchParams.set('api_key', accessToken);
   }

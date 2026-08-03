@@ -1,6 +1,10 @@
 import type { PtvDiagnosticsSnapshot } from '../types/ptv';
 import type { RequestTracker } from './requestTracker';
 import { redactSensitiveText } from './redaction';
+import {
+  HomePerformanceStore,
+  type HomePerformanceAttemptUpdate
+} from './homePerformance';
 
 interface DiagnosticsLog {
   id: string;
@@ -61,6 +65,7 @@ export class DiagnosticsService {
   private logSequence = 0;
   private readonly maxLogs = 200;
   private requestTracker?: RequestTracker;
+  private readonly homePerformance = new HomePerformanceStore();
 
   public attachTracker(tracker: RequestTracker) {
     this.requestTracker = tracker;
@@ -131,6 +136,22 @@ export class DiagnosticsService {
     this.lastUiError = null;
   }
 
+  public synchronizeHomePerformanceSession(sessionKey: string | null) {
+    this.homePerformance.synchronizeSession(sessionKey);
+  }
+
+  public beginHomePerformanceAttempt() {
+    return this.homePerformance.beginAttempt();
+  }
+
+  public recordHomePerformance(update: HomePerformanceAttemptUpdate) {
+    return this.homePerformance.upsert(update);
+  }
+
+  public getHomePerformanceSnapshot() {
+    return this.homePerformance.snapshot();
+  }
+
   public snapshot(input: DiagnosticsSnapshotInput): PtvDiagnosticsSnapshot {
     const safeUrl = this.redactServerUrl(input.serverUrl);
     const safeUser = this.redactSensitive(input.userId);
@@ -163,13 +184,13 @@ export class DiagnosticsService {
       pluginVersion: input.ptvPluginVersion ?? null,
       pluginApiVersion: input.ptvApiVersion ?? null,
       capabilities: input.capabilities,
-      currentRoute: input.route,
-      previousRoute: typeof recordedPreviousRoute === 'string' ? recordedPreviousRoute : input.previousRoute,
-      currentFocusId: input.focusId,
-      previousFocusId: input.previousFocusId,
+      currentRoute: this.sanitizeRoute(input.route) ?? 'unknown',
+      previousRoute: this.sanitizeRoute(typeof recordedPreviousRoute === 'string' ? recordedPreviousRoute : input.previousRoute),
+      currentFocusId: this.sanitizeFocusId(input.focusId),
+      previousFocusId: this.sanitizeFocusId(input.previousFocusId),
       activeRequests: this.requestTracker?.getActiveCount() ?? 0,
       peakConcurrentRequests: this.requestTracker?.getPeakConcurrency() ?? 0,
-      recentCompletions: this.requestTracker?.getRecentCompletions(20).map(entry => ({
+      recentCompletions: this.requestTracker?.getRecentRequests(20).map(entry => ({
         id: entry.id,
         url: entry.url,
         method: entry.method,
@@ -189,10 +210,7 @@ export class DiagnosticsService {
       cancelledRequestCount: this.requestTracker?.getCancelledCount(),
       timeoutRequestCount: this.requestTracker?.getTimeoutCount(),
       duplicateRequestCount: this.requestTracker?.getDuplicateCount(),
-      slowestRequestMs: this.requestTracker?.getRecentCompletions(1).reduce(
-        (max, entry) => Math.max(max, entry.durationMs ?? 0),
-        0
-      ) ?? 0,
+      slowestRequestMs: this.requestTracker?.getSlowestDuration() ?? 0,
       requestDurations: this.requestTracker?.getRecentDurations(30) ?? [],
       recentFailures: this.requestTracker?.getRecentErrors(20) ?? [],
       memoryEstimate: this.safeRead(() => (performance as any).memory?.usedJSHeapSize),
@@ -232,7 +250,8 @@ export class DiagnosticsService {
       recentNavigationEvents: this.navigationEvents.slice(-12).map(event => ({ ...event })),
       recentLifecycleEvents: this.lifecycleEvents.slice(-12).map(event => ({ ...event })),
       lastRouteFocusRestore: this.lastRouteFocusRestore ? { ...this.lastRouteFocusRestore } : null,
-      recentFocusTransitions: this.focusTransitions.slice(-12).map(event => ({ ...event }))
+      recentFocusTransitions: this.focusTransitions.slice(-12).map(event => ({ ...event })),
+      homePerformance: this.homePerformance.snapshot()
     };
   }
 
@@ -311,6 +330,8 @@ export class DiagnosticsService {
     }
     if (normalizedKey === 'userid') return this.redactSensitive(value);
     if (normalizedKey === 'serverurl' || normalizedKey === 'serverorigin') return this.redactServerUrl(value);
+    if (normalizedKey.endsWith('route') || normalizedKey === 'routeid') return this.sanitizeRoute(value);
+    if (normalizedKey.endsWith('focusid')) return this.sanitizeFocusId(value);
     return redactSensitiveText(value);
   }
 
@@ -354,6 +375,21 @@ export class DiagnosticsService {
   private redactSensitive(input?: string | null) {
     if (!input) return '[redacted]';
     return input.length > 4 ? `...${input.slice(-4)}` : '[redacted]';
+  }
+
+  private sanitizeRoute(input?: string | null) {
+    if (!input) return null;
+    return redactSensitiveText(input)
+      .replace(/\b(details|playback):[^?\s]+/gi, '$1:[redacted]')
+      .replace(/([?&]section=)[^&\s]+/gi, '$1[redacted]');
+  }
+
+  private sanitizeFocusId(input?: string | null) {
+    if (!input) return null;
+    return redactSensitiveText(input)
+      .replace(/^(home-(?:continue|nextup|movies|shows)-).+$/i, '$1[redacted]')
+      .replace(/^((?:browse|movie|show|search)-[^-]+-).+$/i, '$1[redacted]')
+      .replace(/^(details-(?:episode|season)-)\w{8,}$/i, '$1[redacted]');
   }
 
   private safeRead<T>(fn: () => T) {

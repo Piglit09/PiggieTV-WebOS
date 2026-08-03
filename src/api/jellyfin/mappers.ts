@@ -55,6 +55,15 @@ function normalizeImageTagArray(raw: unknown): string[] | undefined {
   return tags.length ? tags : undefined;
 }
 
+function normalizeStringArray(raw: unknown, maximum = 8): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const values = raw
+    .map(value => toOptionalString(value))
+    .filter((value): value is string => Boolean(value))
+    .slice(0, maximum);
+  return values.length ? values : undefined;
+}
+
 function safeDisplayName(nameSource: unknown, fallback = 'Untitled'): string {
   const fallbackCandidates = [
     toOptionalString(nameSource)
@@ -137,8 +146,14 @@ export function mapPtvItem(raw: unknown): PtvItem {
     indexNumber: toOptionalNumber(value.IndexNumber),
     parentIndexNumber: toOptionalNumber(value.ParentIndexNumber),
     productionYear: toOptionalNumber(value.ProductionYear),
+    premiereDate: toOptionalString(value.PremiereDate),
+    endDate: toOptionalString(value.EndDate),
+    status: toOptionalString(value.Status),
     overview: toOptionalString(value.Overview),
     runTimeTicks: toOptionalNumber(value.RunTimeTicks),
+    officialRating: toOptionalString(value.OfficialRating),
+    communityRating: toOptionalNumber(value.CommunityRating),
+    genres: normalizeStringArray(value.Genres),
     imageTags: mergedImageTags,
     backdropImageTags: normalizeImageTagArray(value.BackdropImageTags),
     playbackPositionTicks: toOptionalNumber(userData.PlaybackPositionTicks),

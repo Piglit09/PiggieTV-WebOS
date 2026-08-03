@@ -23,4 +23,11 @@ describe('Chrome 68 CSS compatibility', () => {
   it('uses physical offsets instead of the unsupported inset shorthand', () => {
     expect(css).not.toMatch(/(?:^|[;{])\s*inset\s*:/m);
   });
+
+  it('uses the purple-to-pink accent fade without the retired blue accent', () => {
+    expect(css).toMatch(/--ptv-purple:\s*#[0-9a-f]{6};/i);
+    expect(css).toMatch(/--ptv-pink:\s*#[0-9a-f]{6};/i);
+    expect(css).toMatch(/linear-gradient\(90deg,\s*var\(--ptv-purple\),\s*var\(--ptv-pink\)\)/);
+    expect(css).not.toMatch(/focus-cyan|#61dcff|rgba\(97,\s*220,\s*255/i);
+  });
 });

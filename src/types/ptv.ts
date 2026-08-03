@@ -36,8 +36,14 @@ export interface PtvItem {
   parentIndexNumber?: number;
 
   productionYear?: number;
+  premiereDate?: string;
+  endDate?: string;
+  status?: string;
   overview?: string;
   runTimeTicks?: number;
+  officialRating?: string;
+  communityRating?: number;
+  genres?: string[];
 
   imageTags?: Record<string, string>;
   backdropImageTags?: string[];
@@ -65,7 +71,7 @@ export interface PtvHomeSection {
 }
 
 export interface PtvNavigationIntent {
-  kind: 'home' | 'movies' | 'shows' | 'search' | 'details' | 'settings' | 'playback';
+  kind: 'home' | 'movies' | 'shows' | 'music' | 'reading' | 'search' | 'details' | 'settings' | 'playback';
   targetId?: string | null;
   metadata?: {
     itemType?: PtvItemKind | null;
@@ -75,10 +81,13 @@ export interface PtvNavigationIntent {
 }
 
 export interface PtvPlaybackIntent {
-  kind: 'movie' | 'series' | 'audio' | 'book';
+  kind: 'movie' | 'episode' | 'audio' | 'book';
   itemId: string;
+  seriesId?: string;
   serverId: string;
   userId: string;
+  title?: string;
+  context?: string;
   startPositionTicks?: number;
   audioStreamIndex?: number | null;
   subtitleStreamIndex?: number | null;
@@ -223,6 +232,7 @@ export interface PtvDiagnosticsSnapshot {
   recentLifecycleEvents?: Array<Record<string, unknown>>;
   lastRouteFocusRestore?: Record<string, unknown> | null;
   recentFocusTransitions?: Array<Record<string, unknown>>;
+  homePerformance?: import('../core/homePerformance').HomePerformanceSnapshot;
 }
 
 export interface PtvRoute {
@@ -234,6 +244,8 @@ export interface PtvRoute {
     | 'home'
     | 'movies'
     | 'shows'
+    | 'music'
+    | 'reading'
     | 'search'
     | 'details'
     | 'settings'

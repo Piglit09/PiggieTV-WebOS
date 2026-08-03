@@ -1,0 +1,368 @@
+import React, { useEffect } from 'react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { PlaybackScreen } from '../src/screens/playback/PlaybackScreen';
+import { AppProvider, useApp } from '../src/state/appContext';
+
+const api = vi.hoisted(() => ({
+  getNextUpForSeries: vi.fn(),
+  getPlaybackInfo: vi.fn(),
+  reportPlaying: vi.fn(),
+  reportProgress: vi.fn(),
+  reportStopped: vi.fn(),
+  resolvePlaybackStreamUrl: vi.fn(),
+  setAccessToken: vi.fn(),
+  setServer: vi.fn()
+}));
+
+vi.mock('../src/api/jellyfin/client', () => ({
+  JellyfinApiClient: vi.fn(() => ({
+    getNextUpForSeries: (...args: unknown[]) => api.getNextUpForSeries(...args),
+    getPlaybackInfo: (...args: unknown[]) => api.getPlaybackInfo(...args),
+    reportPlaying: (...args: unknown[]) => api.reportPlaying(...args),
+    reportProgress: (...args: unknown[]) => api.reportProgress(...args),
+    reportStopped: (...args: unknown[]) => api.reportStopped(...args),
+    setAccessToken: (token?: string) => api.setAccessToken(token),
+    setServer: (serverUrl: string) => api.setServer(serverUrl)
+  })),
+  resolvePlaybackStreamUrl: (...args: unknown[]) => api.resolvePlaybackStreamUrl(...args)
+}));
+
+function PlaybackHarness({ autoPlayNext = true }: { autoPlayNext?: boolean }) {
+  const { state, dispatch } = useApp();
+
+  useEffect(() => {
+    dispatch({ type: 'set_server_url', serverUrl: 'https://server.example.test' });
+    dispatch({
+      type: 'set_user_session',
+      userSession: {
+        userId: 'user-overlay',
+        userName: 'Overlay User',
+        accessToken: 'test-token',
+        serverId: 'server-overlay',
+        serverUrl: 'https://server.example.test',
+        deviceId: 'device-overlay',
+        createdAt: 1,
+        updatedAt: 1
+      }
+    });
+    dispatch({
+      type: 'set_playback_intent',
+      playbackIntent: {
+        kind: 'episode',
+        itemId: 'item-overlay',
+        seriesId: 'series-overlay',
+        serverId: 'server-overlay',
+        userId: 'user-overlay',
+        title: 'Overlay Feature',
+        context: 'Season 2 · Episode 3'
+      }
+    });
+    dispatch({ type: 'update_settings', settings: { autoPlayNext } });
+    dispatch({
+      type: 'reset_route',
+      route: { screen: 'details', itemId: 'series-overlay', sectionId: null }
+    });
+    dispatch({
+      type: 'set_route',
+      route: { screen: 'playback', itemId: 'item-overlay', sectionId: null }
+    });
+  }, [autoPlayNext, dispatch]);
+
+  const playbackReady = state.route.screen === 'playback' && state.playbackIntent && state.userSession;
+  return (
+    <>
+      {playbackReady ? <PlaybackScreen /> : null}
+      <output data-testid="playback-state">
+        {`${state.route.screen}:${state.route.itemId ?? ''}|${state.routeHistory.map(route => `${route.screen}:${route.itemId ?? ''}`).join(',')}`}
+      </output>
+    </>
+  );
+}
+
+beforeEach(() => {
+  localStorage.clear();
+  vi.useFakeTimers();
+  Object.values(api).forEach(mock => mock.mockReset());
+  api.getPlaybackInfo.mockResolvedValue({
+    PlaySessionId: 'session-overlay',
+    MediaSources: [{
+      Id: 'source-overlay',
+      Container: 'mp4',
+      VideoCodec: 'h264',
+      AudioCodec: 'aac',
+      SupportsDirectPlay: true,
+      SupportsDirectStream: true,
+      SupportsTranscoding: true
+    }]
+  });
+  api.reportPlaying.mockResolvedValue({});
+  api.reportProgress.mockResolvedValue({});
+  api.reportStopped.mockResolvedValue({});
+  api.getNextUpForSeries.mockResolvedValue({ Items: [] });
+  api.resolvePlaybackStreamUrl.mockImplementation((_serverUrl: string, itemId: string) => (
+    `https://media.example.test/Videos/${itemId}/stream.mp4`
+  ));
+});
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+async function flushPlaybackWork(rounds = 12) {
+  await act(async () => {
+    for (let index = 0; index < rounds; index += 1) await Promise.resolve();
+  });
+}
+
+function defer<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(next => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
+describe('Phase 2 playback overlay', () => {
+  it('shows title, context, and semantic progress without replacing or reloading the video when visibility toggles', async () => {
+    const load = vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+
+    render(
+      <AppProvider>
+        <PlaybackHarness />
+      </AppProvider>
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('heading', { name: 'Overlay Feature' })).toBeTruthy();
+    expect(screen.getByText('Season 2 · Episode 3')).toBeTruthy();
+
+    const videos = document.querySelectorAll('video');
+    expect(videos).toHaveLength(1);
+    const video = videos[0] as HTMLVideoElement;
+    const source = video.getAttribute('src');
+    expect(source).toBe('https://media.example.test/Videos/item-overlay/stream.mp4');
+
+    Object.defineProperties(video, {
+      readyState: { configurable: true, value: 2 },
+      duration: { configurable: true, value: 120 },
+      currentTime: { configurable: true, writable: true, value: 30 }
+    });
+    await act(async () => {
+      fireEvent.loadedData(video);
+      fireEvent.timeUpdate(video);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(play).toHaveBeenCalledTimes(1);
+    const progress = screen.getByRole('progressbar', { name: 'Playback progress' });
+    expect(progress.getAttribute('aria-valuemin')).toBe('0');
+    expect(progress.getAttribute('aria-valuemax')).toBe('100');
+    expect(progress.getAttribute('aria-valuenow')).toBe('25');
+    expect(progress.getAttribute('aria-valuetext')).toBe('0:30 of 2:00');
+
+    const overlay = document.querySelector('.ptv-playback__overlay') as HTMLElement;
+    expect(overlay.getAttribute('aria-hidden')).toBe('false');
+    expect(overlay.classList.contains('is-hidden')).toBe(false);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4_501);
+    });
+    expect(overlay.getAttribute('aria-hidden')).toBe('true');
+    expect(overlay.classList.contains('is-hidden')).toBe(true);
+    expect(document.querySelectorAll('video')).toHaveLength(1);
+    expect(document.querySelector('video')).toBe(video);
+    expect(video.getAttribute('src')).toBe(source);
+    expect(load).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('ptv-remote-input'));
+    });
+    expect(overlay.getAttribute('aria-hidden')).toBe('false');
+    expect(overlay.classList.contains('is-hidden')).toBe(false);
+    expect(document.querySelectorAll('video')).toHaveLength(1);
+    expect(document.querySelector('video')).toBe(video);
+    expect(video.getAttribute('src')).toBe(source);
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for the ended report, advances once to the next Series episode, and replaces the playback route', async () => {
+    const load = vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+    api.getNextUpForSeries.mockResolvedValue({
+      Items: [
+        {
+          Id: 'item-overlay',
+          Type: 'Episode',
+          Name: 'Overlay Feature',
+          SeriesId: 'series-overlay'
+        },
+        {
+          Id: 'item-next',
+          Type: 'Episode',
+          Name: 'The Next Feature',
+          SeriesId: 'series-overlay',
+          SeriesName: 'Overlay Series',
+          SeasonName: 'Season 2',
+          ParentIndexNumber: 2,
+          IndexNumber: 4,
+          UserData: { PlaybackPositionTicks: 0 }
+        }
+      ]
+    });
+
+    render(
+      <AppProvider>
+        <PlaybackHarness />
+      </AppProvider>
+    );
+    await flushPlaybackWork();
+
+    const video = document.querySelector('video') as HTMLVideoElement;
+    Object.defineProperties(video, {
+      readyState: { configurable: true, value: 2 },
+      duration: { configurable: true, value: 120 },
+      currentTime: { configurable: true, writable: true, value: 120 },
+      ended: { configurable: true, value: true }
+    });
+    await act(async () => {
+      fireEvent.loadedData(video);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(play).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      fireEvent.ended(video);
+      fireEvent.ended(video);
+      for (let index = 0; index < 16; index += 1) await Promise.resolve();
+    });
+
+    expect(api.reportStopped).toHaveBeenCalledTimes(1);
+    expect(api.getNextUpForSeries).toHaveBeenCalledTimes(1);
+    expect(api.getNextUpForSeries).toHaveBeenCalledWith(
+      'user-overlay',
+      'series-overlay',
+      2,
+      expect.any(AbortSignal)
+    );
+    expect(api.reportStopped.mock.invocationCallOrder[0]).toBeLessThan(
+      api.getNextUpForSeries.mock.invocationCallOrder[0] as number
+    );
+    expect(api.getPlaybackInfo).toHaveBeenCalledTimes(2);
+    expect(api.getPlaybackInfo.mock.calls[1]?.[1]).toBe('item-next');
+    expect(screen.getByRole('heading', { name: 'The Next Feature' })).toBeTruthy();
+    expect(screen.getByText('Overlay Series · S2 E4')).toBeTruthy();
+    expect(document.querySelectorAll('video')).toHaveLength(1);
+    expect(document.querySelector('video')).toBe(video);
+    expect(video.getAttribute('src')).toBe('https://media.example.test/Videos/item-next/stream.mp4');
+    expect(load.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByTestId('playback-state').textContent).toBe(
+      'playback:item-next|details:series-overlay'
+    );
+  });
+
+  it('leaves an ended episode in place when auto-play next is disabled', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+
+    render(
+      <AppProvider>
+        <PlaybackHarness autoPlayNext={false} />
+      </AppProvider>
+    );
+    await flushPlaybackWork();
+
+    const video = document.querySelector('video') as HTMLVideoElement;
+    Object.defineProperties(video, {
+      readyState: { configurable: true, value: 2 },
+      duration: { configurable: true, value: 120 },
+      currentTime: { configurable: true, writable: true, value: 120 },
+      ended: { configurable: true, value: true }
+    });
+    await act(async () => {
+      fireEvent.loadedData(video);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      fireEvent.ended(video);
+      for (let index = 0; index < 8; index += 1) await Promise.resolve();
+    });
+
+    expect(api.reportStopped).toHaveBeenCalledTimes(1);
+    expect(api.getNextUpForSeries).not.toHaveBeenCalled();
+    expect(api.getPlaybackInfo).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Ended' })).toBeTruthy();
+    expect(screen.getByTestId('playback-state').textContent).toBe(
+      'playback:item-overlay|details:series-overlay'
+    );
+  });
+
+  it('cancels a pending next-episode lookup when Back leaves playback', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+    const lookup = defer<{ Items: Array<Record<string, unknown>> }>();
+    api.getNextUpForSeries.mockReturnValue(lookup.promise);
+
+    render(
+      <AppProvider>
+        <PlaybackHarness />
+      </AppProvider>
+    );
+    await flushPlaybackWork();
+
+    const video = document.querySelector('video') as HTMLVideoElement;
+    Object.defineProperties(video, {
+      readyState: { configurable: true, value: 2 },
+      duration: { configurable: true, value: 120 },
+      currentTime: { configurable: true, writable: true, value: 120 },
+      ended: { configurable: true, value: true }
+    });
+    await act(async () => {
+      fireEvent.loadedData(video);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    fireEvent.ended(video);
+    await flushPlaybackWork();
+    expect(api.getNextUpForSeries).toHaveBeenCalledTimes(1);
+
+    const lookupSignal = api.getNextUpForSeries.mock.calls[0]?.[3] as AbortSignal;
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+      expect(lookupSignal.aborted).toBe(true);
+      lookup.resolve({
+        Items: [{
+          Id: 'item-too-late',
+          Type: 'Episode',
+          Name: 'Too Late',
+          SeriesId: 'series-overlay'
+        }]
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId('playback-state').textContent).toBe(
+      'details:series-overlay|'
+    );
+    expect(document.querySelector('video')).toBeNull();
+    await flushPlaybackWork();
+
+    expect(api.getPlaybackInfo).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('heading', { name: 'Too Late' })).toBeNull();
+  });
+});

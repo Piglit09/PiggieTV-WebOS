@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DiagnosticsService } from '../src/core/diagnostics';
 import { redactSensitiveText } from '../src/core/redaction';
+import { RequestTracker } from '../src/core/requestTracker';
 
 const snapshotInput = {
   appVersion: '0.1.0',
@@ -156,12 +157,141 @@ describe('diagnostics', () => {
     });
     expect(snapshot.lastInputEvent).toMatchObject({ keyCode: 461, repeat: false, handled: true });
     expect(snapshot.lastLifecycleEvent).toBe('visibilitychange');
-    expect(snapshot.previousRoute).toBe('details:item');
+    expect(snapshot.previousRoute).toBe('details:[redacted]');
     expect(snapshot.lastNavigationEvent).toMatchObject({ outcome: 'history-back', currentRoute: 'home' });
     expect(snapshot.lastRouteFocusRestore).toMatchObject({ reason: 'route-fallback', fallbackUsed: true });
     expect(exported).not.toContain(secret);
     expect(exported).not.toContain('user:pass');
     expect(exported).not.toContain('user-123456');
+  });
+
+  it('sanitizes dynamic routes, query values, and focus IDs in raw snapshots', () => {
+    const diagnostics = new DiagnosticsService();
+    const itemId = '0123456789abcdef0123456789abcdef';
+    const sectionId = 'private-home-row';
+
+    diagnostics.recordNavigationEvent({
+      type: 'route-change',
+      previousRoute: `playback:${itemId}`,
+      currentRoute: `details:${itemId}?section=${sectionId}`
+    });
+    diagnostics.recordFocusTransition({
+      routeId: `details:${itemId}`,
+      previousFocusId: `details-episode-${itemId}`,
+      nextFocusId: `home-movies-${itemId}`,
+      reason: 'route-restore'
+    });
+
+    const snapshot = diagnostics.snapshot({
+      ...snapshotInput,
+      route: `details:${itemId}?section=${sectionId}`,
+      previousRoute: `playback:${itemId}`,
+      focusId: `home-movies-${itemId}`,
+      previousFocusId: `details-episode-${itemId}`
+    });
+
+    expect(snapshot).toMatchObject({
+      currentRoute: 'details:[redacted]?section=[redacted]',
+      previousRoute: 'playback:[redacted]',
+      currentFocusId: 'home-movies-[redacted]',
+      previousFocusId: 'details-episode-[redacted]'
+    });
+    expect(snapshot.lastNavigationEvent).toMatchObject({
+      previousRoute: 'playback:[redacted]',
+      currentRoute: 'details:[redacted]?section=[redacted]'
+    });
+    expect(snapshot.lastRouteFocusRestore).toMatchObject({
+      routeId: 'details:[redacted]',
+      previousFocusId: 'details-episode-[redacted]',
+      nextFocusId: 'home-movies-[redacted]'
+    });
+    const rawSnapshot = JSON.stringify(snapshot);
+    expect(rawSnapshot).not.toContain(itemId);
+    expect(rawSnapshot).not.toContain(sectionId);
+  });
+
+  it('includes mixed recent request outcomes and the true slowest duration', () => {
+    const diagnostics = new DiagnosticsService();
+    const tracker = new RequestTracker();
+    diagnostics.attachTracker(tracker);
+
+    const slow = tracker.start('/api/slow', 'GET', 'home', 'home');
+    const fast = tracker.start('/api/fast', 'GET', 'home', 'home');
+    const failed = tracker.start('/api/failed', 'GET', 'home', 'home');
+    const cancelled = tracker.start('/api/cancelled', 'GET', 'home', 'home');
+    const active = tracker.start('/api/active', 'GET', 'home', 'home');
+    tracker.complete(slow, 200, 730);
+    tracker.complete(fast, 204, 12);
+    tracker.fail(failed, new Error('Network unavailable'));
+    tracker.cancel(cancelled, 'Route hidden');
+
+    const snapshot = diagnostics.snapshot(snapshotInput);
+    const recent = snapshot.recentCompletions ?? [];
+
+    expect(recent.map(entry => entry.id)).toEqual([slow, fast, failed, cancelled, active]);
+    expect(recent.find(entry => entry.id === failed)).toMatchObject({ error: 'Network unavailable' });
+    expect(recent.find(entry => entry.id === cancelled)).toMatchObject({
+      cancelled: true,
+      error: 'Route hidden'
+    });
+    expect(snapshot).toMatchObject({
+      activeRequests: 1,
+      failedRequestCount: 1,
+      cancelledRequestCount: 1,
+      slowestRequestMs: 730
+    });
+  });
+
+  it('exports Home performance metrics without the private session boundary', () => {
+    const diagnostics = new DiagnosticsService();
+    const privateUser = 'diagnostics-private-user';
+    const privateToken = 'diagnostics-private-token';
+    const sessionKey = `https://private.example.com\u0000${privateUser}\u0000${privateToken}`;
+    diagnostics.synchronizeHomePerformanceSession(sessionKey);
+    const attemptId = diagnostics.beginHomePerformanceAttempt();
+
+    expect(attemptId).toMatch(/^home_[a-z0-9]+$/);
+    diagnostics.recordHomePerformance({
+      attemptId: attemptId as string,
+      usableMs: 92.5,
+      firstPopulatedMs: 44,
+      maxActiveRequests: 3,
+      imageFailures: 1,
+      status: 'complete',
+      rows: {
+        continue: {
+          cache: 'hit',
+          durationMs: 8,
+          outcome: 'success',
+          renderCount: 2
+        },
+        movies: {
+          cache: 'miss',
+          durationMs: 71.25,
+          outcome: 'success',
+          renderCount: 1
+        }
+      }
+    });
+
+    const snapshot = diagnostics.snapshot(snapshotInput);
+    expect(snapshot.homePerformance?.latestAttempt).toMatchObject({
+      attemptId,
+      usableMs: 92.5,
+      firstPopulatedMs: 44,
+      maxActiveRequests: 3,
+      imageFailures: 1,
+      status: 'complete',
+      rows: {
+        continue: { cache: 'hit', durationMs: 8, outcome: 'success', renderCount: 2 },
+        movies: { cache: 'miss', durationMs: 71.25, outcome: 'success', renderCount: 1 }
+      }
+    });
+    const rawSnapshot = JSON.stringify(snapshot);
+    expect(rawSnapshot).not.toContain(sessionKey);
+    expect(rawSnapshot).not.toContain(privateUser);
+    expect(rawSnapshot).not.toContain(privateToken);
+    expect(diagnostics.toDiagnosticText(snapshot)).not.toContain(privateToken);
   });
 
   it('bounds high-frequency input diagnostics while retaining the latest event', () => {
