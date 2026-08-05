@@ -74,7 +74,51 @@ function PlaybackHarness({ autoPlayNext = true }: { autoPlayNext?: boolean }) {
     <>
       {playbackReady ? <PlaybackScreen /> : null}
       <output data-testid="playback-state">
-        {`${state.route.screen}:${state.route.itemId ?? ''}|${state.routeHistory.map(route => `${route.screen}:${route.itemId ?? ''}`).join(',')}`}
+        {`${state.route.screen}:${state.route.itemId ?? ''}${state.route.sectionId ? `?section=${state.route.sectionId}` : ''}|${state.routeHistory.map(route => `${route.screen}:${route.itemId ?? ''}`).join(',')}`}
+      </output>
+    </>
+  );
+}
+
+function AudioPlaybackHarness() {
+  const { state, dispatch } = useApp();
+
+  useEffect(() => {
+    dispatch({ type: 'set_server_url', serverUrl: 'https://server.example.test' });
+    dispatch({
+      type: 'set_user_session',
+      userSession: {
+        userId: 'user-audio-overlay',
+        userName: 'Overlay Audio User',
+        accessToken: 'audio-token',
+        serverId: 'server-overlay',
+        serverUrl: 'https://server.example.test',
+        deviceId: 'device-overlay-audio',
+        createdAt: 1,
+        updatedAt: 1
+      }
+    });
+    dispatch({
+      type: 'set_playback_intent',
+      playbackIntent: {
+        kind: 'audio',
+        itemId: 'audio-track-overlay',
+        serverId: 'server-overlay',
+        userId: 'user-audio-overlay',
+        title: 'Audio Feature',
+        artist: 'Overlay Artist',
+        album: 'Overlay Album'
+      }
+    });
+    dispatch({ type: 'set_route', route: { screen: 'playback', itemId: 'audio-track-overlay', sectionId: null } });
+  }, [dispatch]);
+
+  const playbackReady = state.route.screen === 'playback' && state.playbackIntent?.kind === 'audio' && state.userSession;
+  return (
+    <>
+      {playbackReady ? <PlaybackScreen /> : null}
+      <output data-testid="audio-playback-state">
+        {`${state.route.screen}:${state.route.itemId ?? ''}${state.route.sectionId ? `?section=${state.route.sectionId}` : ''}|${state.routeHistory.map(route => `${route.screen}:${route.itemId ?? ''}`).join(',')}`}
       </output>
     </>
   );
@@ -263,7 +307,7 @@ describe('Phase 2 playback overlay', () => {
     expect(api.getPlaybackInfo).toHaveBeenCalledTimes(2);
     expect(api.getPlaybackInfo.mock.calls[1]?.[1]).toBe('item-next');
     expect(screen.getByRole('heading', { name: 'The Next Feature' })).toBeTruthy();
-    expect(screen.getByText('Overlay Series · S2 E4')).toBeTruthy();
+    expect(screen.getByText('Overlay Series - S2 E4')).toBeTruthy();
     expect(document.querySelectorAll('video')).toHaveLength(1);
     expect(document.querySelector('video')).toBe(video);
     expect(video.getAttribute('src')).toBe('https://media.example.test/Videos/item-next/stream.mp4');
@@ -364,5 +408,36 @@ describe('Phase 2 playback overlay', () => {
 
     expect(api.getPlaybackInfo).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('heading', { name: 'Too Late' })).toBeNull();
+  });
+
+  it('supports mini audio playback and promotes to now-playing mode on request', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+
+    render(
+      <AppProvider>
+        <AudioPlaybackHarness />
+      </AppProvider>
+    );
+    await flushPlaybackWork();
+
+    expect(screen.getByRole('button', { name: 'Now Playing' })).toBeTruthy();
+    const initialMiniRoute = screen.getByTestId('audio-playback-state').textContent ?? '';
+    expect(initialMiniRoute).toContain('playback:audio-track-overlay|');
+    expect(initialMiniRoute).not.toContain('?section=');
+    expect(document.querySelector('.ptv-playback-mini')).toBeTruthy();
+    expect(document.querySelector('.ptv-playback__overlay')).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Now Playing' }));
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId('audio-playback-state').textContent).toContain(
+      'playback:audio-track-overlay?section=now-playing|'
+    );
+    expect(document.querySelector('.ptv-playback-mini')).toBeNull();
+    expect(document.querySelector('.ptv-playback__overlay')).toBeTruthy();
   });
 });

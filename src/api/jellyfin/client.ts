@@ -354,7 +354,7 @@ export class JellyfinApiClient {
     );
   }
 
-  public getSearch(sessionUserId: string, query: string, include = 'Movie,Series,MusicAlbum,Audio,Book', signal?: AbortSignal) {
+  public getSearch(sessionUserId: string, query: string, include = 'Movie,Series,MusicAlbum,Audio,MusicVideo,MusicArtist,Playlist,Book', signal?: AbortSignal) {
     return this.get<{ Items: Array<Record<string, unknown>>; TotalRecordCount?: number }>(
       `Users/${encodeURIComponent(sessionUserId)}/Items`,
       {

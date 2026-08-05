@@ -2,6 +2,7 @@ import { useEffect, useRef, type Dispatch } from 'react';
 import { AppProvider, useApp, type AppAction } from '../state/appContext';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { ScreenRouter } from './ScreenRouter';
+import { PlaybackScreen } from '../screens/playback/PlaybackScreen';
 import { buildRoute, toRouteString } from '../navigation/router';
 import { normalizeServerUrl } from '../api/jellyfin/normalizeUrl';
 import { PTV_PRODUCTION_SERVER_URL } from '../config/server';
@@ -400,13 +401,19 @@ function StartupCoordinator() {
     if (state.routeHistory.length > 0) {
       const targetRoute = historyTarget ? toRouteString(historyTarget) : null;
       if (state.route.screen === 'playback') {
-        recordBack('playback-stop-and-history', targetRoute);
-        void services.playback.stop('back');
-        dispatch({ type: 'set_playback_intent', playbackIntent: null });
+        const playbackIntent = state.playbackIntent;
+        if (playbackIntent?.kind === 'audio') {
+          recordBack('playback-audio-keep-going', targetRoute);
+        } else {
+          recordBack('playback-stop-and-history', targetRoute);
+          void services.playback.stop('back');
+          dispatch({ type: 'set_playback_intent', playbackIntent: null });
+        }
+        dispatch({ type: 'go_back' });
       } else {
         recordBack(state.route.screen === 'quick-connect' ? 'quick-connect-cancel-and-history' : 'history', targetRoute);
+        dispatch({ type: 'go_back' });
       }
-      dispatch({ type: 'go_back' });
       return;
     }
     if (state.route.screen === 'auth') {
@@ -466,6 +473,7 @@ function StartupCoordinator() {
         onOpenDiagnostics={() => setRouteSafe(dispatch, 'diagnostics')}
       >
         <ScreenRouter />
+        <PlaybackScreen />
       </ErrorBoundary>
     </>
   );

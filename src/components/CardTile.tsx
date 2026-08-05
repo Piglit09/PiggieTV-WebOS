@@ -8,7 +8,11 @@ function placeholderLabel(item: PtvItem) {
   if (item.type === 'Episode') return 'EP';
   if (item.type === 'Series') return 'TV';
   if (item.type === 'Movie') return 'MOV';
-  if (item.type === 'MusicAlbum' || item.type === 'Audio') return 'MUS';
+  if (item.type === 'Unknown' && item.mediaType?.toLowerCase() === 'audio') return 'SNG';
+  if (item.type === 'Audio') return 'SNG';
+  if (item.type === 'MusicAlbum') return 'ALB';
+  if (item.type === 'MusicArtist') return 'ART';
+  if (item.type === 'MusicVideo') return 'MV';
   if (item.type === 'Book') return 'READ';
   return 'PTV';
 }

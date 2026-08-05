@@ -7,6 +7,7 @@ import {
   isMusicAlbumItem,
   isMusicArtistItem,
   isMovieItem,
+  isMusicVideoItem,
   isPhotoOrUnsupportedItem,
   isSeriesItem,
   isUnsupportedDetailItem,
@@ -88,6 +89,7 @@ describe('Ptv item mapper', () => {
     expect(() => mapPtvItem({ Name: 'NoId', Type: 'Movie' })).toThrow();
     expect(mapPtvItem({ Id: 'x', Type: undefined, Name: 'NoType' }).type).toBe('Unknown');
     expect(mapItemTypeFromServer('Series')).toBe('Series');
+    expect(mapItemTypeFromServer('series')).toBe('Series');
     expect(mapItemTypeFromServer('UnknownStuff')).toBe('Unknown');
   });
 
@@ -99,6 +101,7 @@ describe('Ptv item mapper', () => {
     const album = mapPtvItem({ Id: 'a', Type: 'MusicAlbum', Name: 'Album' });
     const artist = mapPtvItem({ Id: 'ar', Type: 'MusicArtist', Name: 'Artist' });
     const song = mapPtvItem({ Id: 't', Type: 'Audio', Name: 'Track' });
+    const video = mapPtvItem({ Id: 'mv', Type: 'MusicVideo', Name: 'Music Video' });
     const book = mapPtvItem({ Id: 'b', Type: 'Book', Name: 'Book' });
     const photo = mapPtvItem({ Id: 'p', Type: 'PhotoAlbum', Name: 'Photo set' });
     const folder = mapPtvItem({ Id: 'f', Type: 'Folder', Name: 'Folder' });
@@ -109,6 +112,7 @@ describe('Ptv item mapper', () => {
     expect(isMusicAlbumItem(album)).toBe(true);
     expect(isMusicArtistItem(artist)).toBe(true);
     expect(isAudioTrackItem(song)).toBe(true);
+    expect(isMusicVideoItem(video)).toBe(true);
     expect(isBookItem(book)).toBe(true);
     expect(isPhotoOrUnsupportedItem(photo)).toBe(true);
     expect(isFolderOrCollectionItem(folder)).toBe(true);
@@ -139,5 +143,66 @@ describe('Ptv item mapper', () => {
     expect(result.map(item => item.id)).toEqual(
       fixtures.map(item => item.Id)
     );
+  });
+
+  it('infers audio items when type case differs or is omitted with audio media type', () => {
+    const lower = mapPtvItem({
+      Id: 'case-audio',
+      Type: 'audio',
+      Name: 'Case Audio'
+    });
+    const audioFromMediaType = mapPtvItem({
+      Id: 'audio-media',
+      Name: 'Audio By MediaType',
+      MediaType: 'Audio'
+    });
+
+    expect(lower.type).toBe('Audio');
+    expect(audioFromMediaType.type).toBe('Audio');
+    expect(lower.type).not.toBe('Movie');
+    expect(audioFromMediaType.type).not.toBe('Movie');
+  });
+
+  it('maps audio track media metadata', () => {
+    const mapped = mapPtvItem({
+      Id: 'song-1',
+      Type: 'Audio',
+      Name: 'Fearless',
+      Artists: ['Taylor Swift'],
+      AlbumArtist: 'Taylor Swift',
+      Album: 'Fearless',
+      AlbumId: 'album-1',
+      IndexNumber: 1,
+      TrackCount: 2,
+      RunTimeTicks: 300000000,
+      ProductionYear: 2008,
+      Genres: ['Pop'],
+      ImageTags: { Primary: 'cover' },
+      BackdropImageTags: ['bg-1'],
+      MediaSources: [{
+        Id: 'source-1',
+        Container: 'flac',
+        Codec: 'flac',
+        MediaStreams: [{ Type: 'Audio', Index: 1, Codec: 'flac', Language: 'en', ChannelCount: 2 }]
+      }],
+      UserData: {
+        PlaybackPositionTicks: 12000000,
+        Played: false,
+        IsFavorite: true
+      }
+    });
+
+    expect(mapped.type).toBe('Audio');
+    expect(mapped.artists).toEqual(['Taylor Swift']);
+    expect(mapped.albumArtist).toBe('Taylor Swift');
+    expect(mapped.album).toBe('Fearless');
+    expect(mapped.albumId).toBe('album-1');
+    expect(mapped.trackNumber).toBe(1);
+    expect(mapped.trackCount).toBe(2);
+    expect(mapped.playbackPositionTicks).toBe(12000000);
+    expect(mapped.favorite).toBe(true);
+    expect(mapped.mediaSources?.[0]?.id).toBe('source-1');
+    expect(mapped.mediaSources?.[0]?.streams?.[0]?.isAudioStream).toBe(true);
+    expect(mapped.mediaSources?.[0]?.streams?.[0]?.channelCount).toBe(2);
   });
 });

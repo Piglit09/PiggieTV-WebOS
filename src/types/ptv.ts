@@ -8,6 +8,7 @@ export type PtvItemKind =
   | 'MusicArtist'
   | 'MusicAlbum'
   | 'Audio'
+  | 'MusicVideo'
   | 'Book'
   | 'Playlist'
   | 'Game'
@@ -24,6 +25,15 @@ export interface PtvItem {
   name: string;
   type: PtvItemKind;
   mediaType?: string;
+  artists?: string[];
+  albumArtist?: string;
+  album?: string;
+  albumId?: string;
+  trackNumber?: number;
+  trackCount?: number;
+  container?: string;
+  codec?: string;
+  mediaSources?: PtvMediaSource[];
 
   seriesId?: string;
   seriesName?: string;
@@ -51,6 +61,50 @@ export interface PtvItem {
   playbackPositionTicks?: number;
   played?: boolean;
   favorite?: boolean;
+}
+
+export interface PtvMediaStreamInfo {
+  id?: string;
+  index?: number;
+  container?: string;
+  codec?: string;
+  language?: string;
+  title?: string;
+  channelCount?: number;
+  isDefault?: boolean;
+  isForced?: boolean;
+  isExternal?: boolean;
+  isVideoStream?: boolean;
+  isAudioStream?: boolean;
+}
+
+export interface PtvMediaSource {
+  id?: string;
+  container?: string;
+  codec?: string;
+  isRemote?: boolean;
+  bitrate?: number;
+  width?: number;
+  height?: number;
+  directStreamUrl?: string;
+  transcodingUrl?: string;
+  streams?: PtvMediaStreamInfo[];
+}
+
+export interface PtvPlaybackQueueItem {
+  itemId: string;
+  title: string;
+  startPositionTicks?: number;
+  context?: string;
+  artist?: string;
+  album?: string;
+  albumId?: string;
+  artworkUrl?: string;
+}
+
+export interface PtvPlaybackQueue {
+  items: PtvPlaybackQueueItem[];
+  index: number;
 }
 
 export interface PtvLibrary {
@@ -88,9 +142,14 @@ export interface PtvPlaybackIntent {
   userId: string;
   title?: string;
   context?: string;
+  artist?: string;
+  album?: string;
+  albumId?: string;
+  artworkUrl?: string;
   startPositionTicks?: number;
   audioStreamIndex?: number | null;
   subtitleStreamIndex?: number | null;
+  queue?: PtvPlaybackQueue;
 }
 
 export interface PtvServerSession {

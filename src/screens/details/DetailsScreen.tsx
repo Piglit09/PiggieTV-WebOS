@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../../state/appContext';
 import { LayoutShell } from '../../components/LayoutShell';
 import { playbackRouteFromIntent, toRouteString } from '../../navigation/router';
-import { mapPtvItem, mapPtvItems } from '../../api/jellyfin/mappers';
+import { isAudioTrackItem, mapPtvItem, mapPtvItems } from '../../api/jellyfin/mappers';
 import type { PtvItem, PtvPlaybackIntent } from '../../types/ptv';
 import { FocusableButton } from '../../components/FocusableButton';
 import { CardTile } from '../../components/CardTile';
@@ -38,9 +38,37 @@ const DETAIL_FIELDS = [
   'SeriesName',
   'SeasonName',
   'IndexNumber',
-  'ParentIndexNumber'
+  'ParentIndexNumber',
+  'Artists',
+  'Album',
+  'AlbumArtist',
+  'AlbumId',
+  'TrackCount',
+  'Container',
+  'Codec',
+  'MediaSources'
 ];
 const EPISODE_PAGE_SIZE = 8;
+const MUSIC_CHILD_FILTER_FIELDS = [
+  'ImageTags',
+  'BackdropImageTags',
+  'RunTimeTicks',
+  'ProductionYear',
+  'Overview',
+  'IndexNumber',
+  'ParentIndexNumber',
+  'Artists',
+  'Album',
+  'AlbumArtist',
+  'AlbumId',
+  'TrackCount',
+  'UserData',
+  'MediaType',
+  'Genres',
+  'MediaSources',
+  'Container',
+  'Codec'
+];
 
 function cleanOverview(value?: string) {
   return value?.replace(/<br\s*\/?\s*>/gi, ' ').replace(/\s+/g, ' ').trim() ?? '';
@@ -57,15 +85,54 @@ function itemProgress(item: PtvItem) {
   return Math.max(0, Math.min(100, (item.playbackPositionTicks / item.runTimeTicks) * 100));
 }
 
+function mediaTypeLabel(item: PtvItem) {
+  if (item.type === 'Episode') return 'Episode';
+  if (item.type === 'Series') return 'Series';
+  if (item.type === 'Movie') return 'Movie';
+  if (item.type === 'Unknown' && item.mediaType?.toLowerCase() === 'audio') return 'Song';
+  if (item.type === 'Audio') return 'Song';
+  if (item.type === 'MusicAlbum') return 'Music Album';
+  if (item.type === 'MusicArtist') return 'Artist';
+  if (item.type === 'MusicVideo') return 'Music Video';
+  if (item.type === 'Playlist') return 'Playlist';
+  if (item.type === 'Book') return 'Book';
+  if (item.type === 'Season') return 'Season';
+  return item.type;
+}
+
 function isPlayable(item: PtvItem) {
-  return item.type === 'Movie' || item.type === 'Episode' || item.type === 'Audio' || item.type === 'Book';
+  return item.type === 'Movie'
+    || item.type === 'Episode'
+    || item.type === 'Audio'
+    || item.type === 'MusicVideo'
+    || item.type === 'Book';
 }
 
 function playbackKind(item: PtvItem): PtvPlaybackIntent['kind'] {
   if (item.type === 'Episode') return 'episode';
-  if (item.type === 'Audio') return 'audio';
+  if (item.type === 'Audio' || item.type === 'MusicVideo') return 'audio';
   if (item.type === 'Book') return 'book';
   return 'movie';
+}
+
+function buildAudioQueueTracks(item: PtvItem | null, tracks: PtvItem[]) {
+  if (!tracks.length) return [];
+  const source = item?.type === 'MusicAlbum' ? item : null;
+  return tracks.map(track => ({
+    itemId: track.id,
+    title: track.name,
+    startPositionTicks: track.playbackPositionTicks,
+    context: track.trackNumber ? `Track ${track.trackNumber}` : undefined,
+    artist: track.artists?.[0] ?? track.albumArtist ?? source?.artists?.[0],
+    album: source?.type === 'MusicAlbum' ? source.name : track.album,
+    albumId: source?.type === 'MusicAlbum' ? source.id : track.albumId,
+    artworkUrl: undefined
+  }));
+}
+
+function indexFromTrack(itemId: string, tracks: PtvItem[]) {
+  const found = tracks.findIndex(track => track.id === itemId);
+  return found >= 0 ? found : 0;
 }
 
 export function DetailsScreen() {
@@ -91,6 +158,9 @@ export function DetailsScreen() {
   const [episodesRetryNonce, setEpisodesRetryNonce] = useState(0);
   const [episodeStart, setEpisodeStart] = useState(0);
   const [episodePage, setEpisodePage] = useState(0);
+  const [albumTracks, setAlbumTracks] = useState<PtvItem[]>([]);
+  const [albumTracksLoading, setAlbumTracksLoading] = useState(false);
+  const [albumTracksError, setAlbumTracksError] = useState<string | null>(null);
   const seasonSelectorRef = useRef<HTMLDivElement>(null);
   const pendingEpisodeFocus = useRef(false);
   const client = useMemo(() => {
@@ -105,6 +175,9 @@ export function DetailsScreen() {
     setItem(cached ?? null);
     setLoading(!cached);
     setError(null);
+    setAlbumTracks([]);
+    setAlbumTracksLoading(false);
+    setAlbumTracksError(null);
     setPosterFailed(false);
     setBackdropFailed(false);
     if (seasonSelectorRef.current) seasonSelectorRef.current.scrollLeft = 0;
@@ -125,6 +198,41 @@ export function DetailsScreen() {
 
     return () => controller.abort('details-route-hidden');
   }, [cacheKey, client, detailsRetryNonce, itemId, userSession]);
+
+  useEffect(() => {
+    if (!item || item.type !== 'MusicAlbum' || !client || !userSession || !cacheKey) {
+      setAlbumTracks([]);
+      setAlbumTracksLoading(false);
+      setAlbumTracksError(null);
+      return;
+    }
+
+    const controller = new AbortController();
+    setAlbumTracksLoading(true);
+    setAlbumTracksError(null);
+    void client.getItems(userSession.userId, {
+      IncludeItemTypes: 'Audio',
+      ParentId: item.id,
+      Recursive: true,
+      SortBy: 'IndexNumber',
+      SortOrder: 'Ascending',
+      Fields: MUSIC_CHILD_FILTER_FIELDS.join(','),
+      EnableUserData: true
+    }, controller.signal)
+      .then(response => {
+        if (controller.signal.aborted) return;
+        const mapped = mapPtvItems(response).filter(isAudioTrackItem);
+        setAlbumTracks(mapped);
+        setAlbumTracksLoading(false);
+      })
+      .catch(cause => {
+        if (controller.signal.aborted) return;
+        setAlbumTracksLoading(false);
+        setAlbumTracksError(redactSensitiveText(cause instanceof Error ? cause.message : 'Tracks could not be loaded.'));
+      });
+
+    return () => controller.abort('music-album-tracks-hidden');
+  }, [cacheKey, client, item, userSession]);
 
   useEffect(() => {
     if (!item || item.type !== 'Series' || !client || !userSession || !cacheKey) {
@@ -251,8 +359,11 @@ export function DetailsScreen() {
     return () => window.cancelAnimationFrame(frame);
   }, [item, seasons, services.focusManager, state.route]);
 
-  const startPlayback = (playable: PtvItem, restart = false) => {
+  const startPlayback = (playable: PtvItem, restart = false, queueTracks: PtvItem[] = []) => {
     if (!isPlayable(playable) || !state.userSession || !state.serverSession) return;
+    const hasAudioQueue = playbackKind(playable) === 'audio' && queueTracks.length > 0;
+    const audioQueueTracks = hasAudioQueue ? buildAudioQueueTracks(item, queueTracks) : [];
+    const queueIndex = hasAudioQueue ? indexFromTrack(playable.id, queueTracks) : 0;
     const intent: PtvPlaybackIntent = {
       kind: playbackKind(playable),
       itemId: playable.id,
@@ -265,10 +376,33 @@ export function DetailsScreen() {
       context: playable.type === 'Episode'
         ? [playable.seriesName, episodeLabel(playable)].filter(Boolean).join(' · ')
         : undefined,
-      startPositionTicks: restart ? 0 : playable.playbackPositionTicks
+      artist: playable.artists?.[0] ?? playable.albumArtist ?? item?.artists?.[0],
+      album: playable.album ?? (item?.type === 'MusicAlbum' ? item.name : undefined),
+      albumId: playable.albumId ?? (item?.type === 'MusicAlbum' ? item.id : undefined),
+      artworkUrl: client ? artworkUrlForItem(client, playable, 'landscape') ?? undefined : undefined,
+      startPositionTicks: restart ? 0 : playable.playbackPositionTicks,
+      queue: hasAudioQueue
+        ? {
+          items: audioQueueTracks.map((queueItem, queueIndexFromTrack) => ({
+            ...queueItem,
+            artworkUrl:
+              queueTracks[queueIndexFromTrack] && client
+                ? artworkUrlForItem(client, queueTracks[queueIndexFromTrack], 'landscape') ?? undefined
+                : undefined
+          })),
+          index: queueIndex
+        }
+        : undefined
     };
     dispatch({ type: 'set_playback_intent', playbackIntent: intent });
     dispatch({ type: 'set_route', route: playbackRouteFromIntent(intent) });
+  };
+  const startAlbumPlayback = () => {
+    if (!item || item.type !== 'MusicAlbum' || !state.userSession || !state.serverSession) return;
+    if (albumTracksLoading) return;
+    const firstTrack = albumTracks[0];
+    if (!firstTrack) return;
+    startPlayback(firstTrack, false, albumTracks);
   };
 
   const selectSeason = (season: PtvItem) => {
@@ -327,7 +461,7 @@ export function DetailsScreen() {
   );
 
   return (
-    <LayoutShell title={item?.type === 'Series' ? 'Series details' : 'Movie details'} onBack={() => dispatch({ type: 'go_back' })}>
+    <LayoutShell title={item ? `${mediaTypeLabel(item)} details` : 'Details'} onBack={() => dispatch({ type: 'go_back' })}>
       <section className={`ptv-details ${item?.type === 'Series' ? 'ptv-details--series' : ''}`}>
         {backdropUrl && !backdropFailed ? (
           <img
@@ -351,7 +485,7 @@ export function DetailsScreen() {
               )}
             </div>
             <div className="ptv-details__copy">
-              <span className="ptv-eyebrow">{item?.type === 'Series' ? 'Series' : item?.type === 'Episode' ? 'Episode' : 'Movie'}</span>
+              <span className="ptv-eyebrow">{item ? mediaTypeLabel(item) : 'Media'}</span>
               <h2>{item?.name ?? (loading ? 'Loading…' : 'Unavailable')}</h2>
               {error ? <p className="ptv-error">{error}</p> : null}
               {error && !item ? (
@@ -370,7 +504,21 @@ export function DetailsScreen() {
                 {cleanOverview(item?.overview) || (item ? 'No overview available.' : '')}
               </p>
 
-              {item && item.type !== 'Series' && isPlayable(item) ? (
+              {item && item.type === 'MusicAlbum' ? (
+                <div className="ptv-details__actions">
+                  <FocusableButton
+                    focusId="details-primary"
+                    preferredRow="details-actions"
+                    className="ptv-primary-action"
+                    onClick={startAlbumPlayback}
+                    disabled={albumTracksLoading || albumTracks.length === 0}
+                  >
+                    {albumTracksLoading ? 'Loading tracks…' : 'Play'}
+                  </FocusableButton>
+                  {albumTracksError ? <p className="ptv-error">{albumTracksError}</p> : null}
+                </div>
+              ) : null}
+              {item && item.type !== 'Series' && item.type !== 'MusicAlbum' && isPlayable(item) ? (
                 <div className="ptv-details__actions">
                   <FocusableButton
                     focusId="details-primary"
@@ -482,8 +630,45 @@ export function DetailsScreen() {
               </div>
             </div>
           ) : null}
+          {item?.type === 'MusicAlbum' ? (
+            <div className="ptv-series-browser">
+              <div className="ptv-episode-line">
+                <h3>Tracks</h3>
+                {albumTracksLoading ? <span className="ptv-muted">Loading tracks…</span> : null}
+                {albumTracksError ? <span className="ptv-error">{albumTracksError}</span> : null}
+                {!albumTracksLoading && !albumTracksError && albumTracks.length === 0 ? (
+                  <p className="ptv-muted">No tracks are available for this album.</p>
+                ) : null}
+                {albumTracks.length ? (
+                  <div className="ptv-episode-viewport">
+                    <ul className="ptv-episode-grid">
+                      {albumTracks.map(track => (
+                        <CardTile
+                          key={track.id}
+                          focusId={`details-track-${track.id}`}
+                          preferredRow="details-episodes"
+                          item={track}
+                          variant="episode"
+                          posterUrl={artworkUrlForItem(client, track, 'landscape')}
+                          context={track.trackNumber ? `Track ${track.trackNumber}` : null}
+                          meta={track.runTimeTicks ? toHms(track.runTimeTicks) : null}
+                          progressPercent={itemProgress(track)}
+                          watched={Boolean(track.played)}
+                        onOpen={() => startPlayback(track, false, albumTracks)}
+                          onFocus={() => setEpisodeStart(0)}
+                          lazy
+                        />
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
         </div>
       </section>
     </LayoutShell>
   );
 }
+
+

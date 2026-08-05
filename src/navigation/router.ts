@@ -18,6 +18,8 @@ export const PTV_ROUTES = [
 ] as const;
 
 export type PtvScreen = (typeof PTV_ROUTES)[number];
+export type PtvPlaybackRouteMode = 'mini' | 'now-playing';
+const NOW_PLAYING_SECTION_ID = 'now-playing';
 
 export function toRouteString(route: PtvRoute): string {
   const base = route.screen;
@@ -51,10 +53,13 @@ export function createNavigationIntent(
   };
 }
 
-export function playbackRouteFromIntent(intent: PtvPlaybackIntent): PtvRoute {
+export function playbackRouteFromIntent(
+  intent: PtvPlaybackIntent,
+  mode: PtvPlaybackRouteMode = 'mini'
+): PtvRoute {
   return {
     screen: 'playback',
     itemId: intent.itemId,
-    sectionId: null
+    sectionId: mode === 'now-playing' ? NOW_PLAYING_SECTION_ID : null
   };
 }

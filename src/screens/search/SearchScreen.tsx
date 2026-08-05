@@ -49,7 +49,7 @@ export function SearchScreen() {
       const request = new AbortController();
       activeRequestRef.current = request;
       client
-        .getSearch(userSession.userId, activeQuery, 'Movie,Series,MusicAlbum,Audio,Book', request.signal)
+        .getSearch(userSession.userId, activeQuery, 'Movie,Series,MusicAlbum,Audio,MusicVideo,MusicArtist,Playlist,Book', request.signal)
         .then(response => {
           if (cancelled) return;
           if (activeQuery !== query.trim()) return;

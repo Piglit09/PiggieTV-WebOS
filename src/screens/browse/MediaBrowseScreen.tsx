@@ -29,7 +29,7 @@ const FILTERS: ReadonlyArray<{ id: MediaBrowseFilter; label: string }> = [
 const BROWSE_CONFIG: Record<BrowseScreenId, { title: string; itemType: string; empty: string }> = {
   movies: { title: 'Movies', itemType: 'Movie', empty: 'No movies match this view.' },
   shows: { title: 'Shows', itemType: 'Series', empty: 'No shows match this view.' },
-  music: { title: 'Music', itemType: 'MusicAlbum', empty: 'No albums match this view.' },
+  music: { title: 'Music', itemType: 'MusicAlbum,Audio,MusicArtist,MusicVideo,Playlist', empty: 'No music titles match this view.' },
   reading: { title: 'Reading', itemType: 'Book', empty: 'No books match this view.' }
 };
 

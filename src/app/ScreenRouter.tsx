@@ -13,7 +13,6 @@ import { SearchScreen } from '../screens/search/SearchScreen';
 import { DetailsScreen } from '../screens/details/DetailsScreen';
 import { SettingsScreen } from '../screens/settings/SettingsScreen';
 import { DiagnosticsScreen } from '../screens/diagnostics/DiagnosticsScreen';
-import { PlaybackScreen } from '../screens/playback/PlaybackScreen';
 
 export function ScreenRouter() {
   const { state } = useApp();
@@ -44,7 +43,7 @@ export function ScreenRouter() {
     case 'diagnostics':
       return <DiagnosticsScreen />;
     case 'playback':
-      return <PlaybackScreen />;
+      return null;
     case 'home':
     default:
       return <HomeScreen />;

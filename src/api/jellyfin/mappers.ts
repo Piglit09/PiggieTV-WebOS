@@ -1,4 +1,4 @@
-import type { PtvError, PtvItem, PtvItemKind, PtvLibrary } from '../../types/ptv';
+import type { PtvError, PtvItem, PtvItemKind, PtvLibrary, PtvMediaSource, PtvMediaStreamInfo } from '../../types/ptv';
 import { toPtvError } from '../../core/errors';
 
 const KNOWN_TYPES: readonly string[] = [
@@ -10,6 +10,7 @@ const KNOWN_TYPES: readonly string[] = [
   'MusicArtist',
   'MusicAlbum',
   'Audio',
+  'MusicVideo',
   'Book',
   'Playlist',
   'Game',
@@ -26,6 +27,7 @@ const DETAIL_NAVIGABLE_TYPES: readonly PtvItemKind[] = [
   'MusicAlbum',
   'MusicArtist',
   'Audio',
+  'MusicVideo',
   'Book'
 ] as const;
 
@@ -64,6 +66,93 @@ function normalizeStringArray(raw: unknown, maximum = 8): string[] | undefined {
   return values.length ? values : undefined;
 }
 
+function normalizeTrackArtists(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const artists = raw
+    .map(item => {
+      if (typeof item === 'string') return item.trim();
+      if (!item || typeof item !== 'object') return '';
+      const record = item as Record<string, unknown>;
+      return (
+        toOptionalString(record.Name) ??
+        toOptionalString(record.name) ??
+        toOptionalString((record as { artist?: unknown }).artist)
+      )?.trim();
+    })
+    .filter((value): value is string => Boolean(value));
+  return artists.length ? artists : undefined;
+}
+
+function normalizeMediaStreams(raw: unknown): PtvMediaStreamInfo[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const streams: Array<PtvMediaStreamInfo | undefined> = raw.map(item => {
+    if (!item || typeof item !== 'object') return undefined;
+    const source = item as Record<string, unknown>;
+    const id = toOptionalString(source.Id) ?? toOptionalString(source.StreamId);
+    const index = toOptionalNumber(source.Index);
+    const codec = toOptionalString(source.Codec);
+    const container = toOptionalString(source.Container);
+    const language = toOptionalString(source.Language);
+    const title = toOptionalString(source.Title);
+    const channelCount = typeof source.ChannelLayout === 'string'
+      ? Number(source.ChannelLayout)
+      : typeof source.Channels === 'number'
+        ? source.Channels
+        : typeof source.ChannelCount === 'number'
+          ? source.ChannelCount
+          : undefined;
+    const isDefault = source.IsDefault === true;
+    const isForced = source.IsForced === true;
+    const isExternal = source.IsExternal === true;
+    const isVideoStream = source.Type === 'Video';
+    const isAudioStream = source.Type === 'Audio';
+
+    return {
+      id,
+      index,
+      container,
+      codec,
+      language,
+      title,
+      channelCount: Number.isFinite(channelCount as number) ? Number(channelCount) : undefined,
+      isDefault,
+      isForced,
+      isExternal,
+      isVideoStream,
+      isAudioStream
+    };
+  });
+  const resolvedStreams = streams
+    .filter((stream): stream is PtvMediaStreamInfo => Boolean(stream))
+    .filter((stream): stream is PtvMediaStreamInfo => (
+      Boolean(stream.id) || Boolean(stream.index) || Boolean(stream.codec)
+    ));
+
+  return resolvedStreams.length ? resolvedStreams : undefined;
+}
+
+function normalizeMediaSources(raw: unknown): PtvMediaSource[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const sources: Array<PtvMediaSource | undefined> = raw.map(item => {
+    if (!item || typeof item !== 'object') return undefined;
+    const source = item as Record<string, unknown>;
+    return {
+      id: toOptionalString(source.Id),
+      container: toOptionalString(source.Container),
+      codec: toOptionalString(source.Codec),
+      isRemote: source.IsRemote === true,
+      bitrate: toOptionalNumber(source.Bitrate),
+      width: toOptionalNumber(source.Width),
+      height: toOptionalNumber(source.Height),
+      directStreamUrl: toOptionalString(source.DirectStreamUrl),
+      transcodingUrl: toOptionalString(source.TranscodingUrl),
+      streams: normalizeMediaStreams(source.MediaStreams)
+    };
+  });
+  const resolvedSources = sources.filter((source): source is PtvMediaSource => Boolean(source?.id));
+  return resolvedSources.length ? resolvedSources : undefined;
+}
+
 function safeDisplayName(nameSource: unknown, fallback = 'Untitled'): string {
   const fallbackCandidates = [
     toOptionalString(nameSource)
@@ -74,9 +163,10 @@ function safeDisplayName(nameSource: unknown, fallback = 'Untitled'): string {
 }
 
 function coerceType(raw: unknown): PtvItemKind {
-  const type = toOptionalString(raw);
+  const type = toOptionalString(raw)?.toLowerCase();
   if (!type) return 'Unknown';
-  return KNOWN_TYPES.includes(type) ? (type as PtvItemKind) : 'Unknown';
+  const exact = KNOWN_TYPES.find(candidate => candidate.toLowerCase() === type);
+  return exact ? (exact as PtvItemKind) : 'Unknown';
 }
 
 export function mapItemTypeFromServer(raw: unknown): PtvItemKind {
@@ -119,6 +209,7 @@ export function mapPtvItem(raw: unknown): PtvItem {
   }
 
   const value = raw as Record<string, unknown>;
+  const mappedType = coerceType(value.Type);
   const id = toOptionalString(value.Id);
   if (!id) {
     throw toPtvError('Item id is required', 'invalid-server-response');
@@ -136,7 +227,9 @@ export function mapPtvItem(raw: unknown): PtvItem {
   return {
     id,
     name: safeDisplayName(value.Name ?? value.OriginalTitle ?? value.SortName ?? value.Path, 'Untitled'),
-    type: coerceType(value.Type),
+    type: mappedType !== 'Unknown'
+      ? mappedType
+      : (toOptionalString(value.MediaType)?.toLowerCase() === 'audio' ? 'Audio' : 'Unknown'),
     mediaType: toOptionalString(value.MediaType),
     seriesId: toOptionalString(value.SeriesId),
     seriesName: toOptionalString(value.SeriesName),
@@ -153,13 +246,22 @@ export function mapPtvItem(raw: unknown): PtvItem {
     runTimeTicks: toOptionalNumber(value.RunTimeTicks),
     officialRating: toOptionalString(value.OfficialRating),
     communityRating: toOptionalNumber(value.CommunityRating),
-    genres: normalizeStringArray(value.Genres),
-    imageTags: mergedImageTags,
-    backdropImageTags: normalizeImageTagArray(value.BackdropImageTags),
-    playbackPositionTicks: toOptionalNumber(userData.PlaybackPositionTicks),
-    played: typeof userData.Played === 'boolean' ? userData.Played : undefined,
-    favorite: typeof userData.IsFavorite === 'boolean' ? userData.IsFavorite : undefined
-  };
+      genres: normalizeStringArray(value.Genres),
+      artists: normalizeTrackArtists(value.Artists),
+      albumArtist: toOptionalString(value.AlbumArtist),
+      album: toOptionalString(value.Album),
+      albumId: toOptionalString(value.AlbumId),
+      trackNumber: toOptionalNumber(value.IndexNumber),
+      trackCount: toOptionalNumber(value.TrackCount),
+      container: toOptionalString(value.Container),
+      codec: toOptionalString(value.Codec),
+      imageTags: mergedImageTags,
+      backdropImageTags: normalizeImageTagArray(value.BackdropImageTags),
+      mediaSources: normalizeMediaSources(value.MediaSources),
+      playbackPositionTicks: toOptionalNumber(userData.PlaybackPositionTicks),
+      played: typeof userData.Played === 'boolean' ? userData.Played : undefined,
+      favorite: typeof userData.IsFavorite === 'boolean' ? userData.IsFavorite : undefined
+    };
 }
 
 export function mapPtvItems(raw: unknown, options: MapPtvItemOptions = {}): PtvItem[] {
@@ -213,6 +315,10 @@ export function isMusicArtistItem(item: PtvItem): item is PtvItem & { type: 'Mus
 
 export function isAudioTrackItem(item: PtvItem): item is PtvItem & { type: 'Audio' } {
   return item.type === 'Audio';
+}
+
+export function isMusicVideoItem(item: PtvItem): item is PtvItem & { type: 'MusicVideo' } {
+  return item.type === 'MusicVideo';
 }
 
 export function isBookItem(item: PtvItem): item is PtvItem & { type: 'Book' } {
