@@ -45,7 +45,11 @@ function routeFallback(route: PtvRoute) {
   if (route.screen === 'movies' || route.screen === 'shows' || route.screen === 'music' || route.screen === 'reading') {
     return 'browse-filter-recent';
   }
-  if (route.screen === 'search') return 'search-query';
+  if (route.screen === 'search') {
+    return route.itemId && route.sectionId?.startsWith('category:')
+      ? 'shell-back-search'
+      : 'search-query';
+  }
   if (route.screen === 'details') return 'details-primary';
   if (route.screen === 'playback') return 'playback-toggle';
   if (route.screen === 'settings') return 'settings-category-server';
@@ -463,7 +467,13 @@ function StartupCoordinator() {
             actionKind: record.action.kind,
             key: record.action.key
           });
-          window.dispatchEvent(new CustomEvent('ptv-remote-input', { detail: record }));
+          window.dispatchEvent(new CustomEvent('ptv-remote-input', {
+            detail: {
+              ...record,
+              source: 'user',
+              key: record.action.key
+            }
+          }));
         }}
       />
       <ErrorBoundary

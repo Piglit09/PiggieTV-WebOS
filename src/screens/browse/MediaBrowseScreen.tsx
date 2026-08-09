@@ -75,13 +75,15 @@ export function MediaBrowseScreen({ screenId }: { screenId: BrowseScreenId }) {
       SortBy: filter === 'recent' ? 'DateCreated' : 'SortName',
       SortOrder: filter === 'recent' ? 'Descending' : 'Ascending',
       Filters: filter === 'favorites' ? 'IsFavorite' : undefined,
-      Fields: 'ImageTags,BackdropImageTags,Overview,ProductionYear,RunTimeTicks,OfficialRating,CommunityRating,Genres,UserData',
+      Fields: 'ImageTags,BackdropImageTags,Overview,ProductionYear,RunTimeTicks,OfficialRating,CommunityRating,Genres,UserData,ChildCount,RecursiveItemCount',
       EnableUserData: true,
       EnableTotalRecordCount: true
     }, controller.signal)
       .then(response => {
         if (controller.signal.aborted) return;
-        const mapped = mapPtvItems(response);
+        const mapped = mapPtvItems(response, {
+          excludeEmptyVideoContainers: screenId === 'shows'
+        });
         const totalRecordCount = typeof response.TotalRecordCount === 'number'
           ? response.TotalRecordCount
           : undefined;

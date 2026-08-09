@@ -28,9 +28,14 @@ const mockGetNextUpForSeries = vi.fn();
 const mockGetRecentlyAdded = vi.fn();
 const mockGetItems = vi.fn();
 const mockGetItem = vi.fn();
+const mockGetSimilarItems = vi.fn();
 const mockGetSeasons = vi.fn();
 const mockGetEpisodes = vi.fn();
 const mockGetSearch = vi.fn();
+const mockGetSearchGenres = vi.fn();
+const mockGetSearchMusicGenres = vi.fn();
+const mockGetSearchStudios = vi.fn();
+const mockGetSearchCategoryItems = vi.fn();
 const mockGetPlaybackInfo = vi.fn();
 const mockReportPlaying = vi.fn();
 const mockReportProgress = vi.fn();
@@ -62,9 +67,14 @@ vi.mock('../../src/api/jellyfin/client', () => ({
       getRecentlyAdded: (...args: unknown[]) => mockGetRecentlyAdded(...args),
       getItems: (...args: unknown[]) => mockGetItems(...args),
       getItem: (...args: unknown[]) => mockGetItem(...args),
+      getSimilarItems: (...args: unknown[]) => mockGetSimilarItems(...args),
       getSeasons: (...args: unknown[]) => mockGetSeasons(...args),
       getEpisodes: (...args: unknown[]) => mockGetEpisodes(...args),
       getSearch: (...args: unknown[]) => mockGetSearch(...args),
+      getSearchGenres: (...args: unknown[]) => mockGetSearchGenres(...args),
+      getSearchMusicGenres: (...args: unknown[]) => mockGetSearchMusicGenres(...args),
+      getSearchStudios: (...args: unknown[]) => mockGetSearchStudios(...args),
+      getSearchCategoryItems: (...args: unknown[]) => mockGetSearchCategoryItems(...args),
       getPlaybackInfo: (...args: unknown[]) => mockGetPlaybackInfo(...args),
       reportPlaying: (...args: unknown[]) => mockReportPlaying(...args),
       reportProgress: (...args: unknown[]) => mockReportProgress(...args),
@@ -154,9 +164,14 @@ beforeEach(() => {
     mockGetRecentlyAdded,
     mockGetItems,
     mockGetItem,
+    mockGetSimilarItems,
     mockGetSeasons,
     mockGetEpisodes,
     mockGetSearch,
+    mockGetSearchGenres,
+    mockGetSearchMusicGenres,
+    mockGetSearchStudios,
+    mockGetSearchCategoryItems,
     mockGetPlaybackInfo,
     mockReportPlaying,
     mockReportProgress,
@@ -194,9 +209,14 @@ beforeEach(() => {
   mockGetRecentlyAdded.mockResolvedValue({ Items: [] });
   mockGetItems.mockResolvedValue({ Items: [] });
   mockGetItem.mockResolvedValue({ Id: 'movie-1', Name: 'Featured Movie', Type: 'Movie', Overview: 'Overview' });
+  mockGetSimilarItems.mockResolvedValue({ Items: [] });
   mockGetSeasons.mockResolvedValue({ Items: [] });
   mockGetEpisodes.mockResolvedValue({ Items: [] });
   mockGetSearch.mockResolvedValue({ Items: [] });
+  mockGetSearchGenres.mockResolvedValue({ Items: [] });
+  mockGetSearchMusicGenres.mockResolvedValue({ Items: [] });
+  mockGetSearchStudios.mockResolvedValue({ Items: [] });
+  mockGetSearchCategoryItems.mockResolvedValue({ Items: [], TotalRecordCount: 0 });
   mockGetPlaybackInfo.mockResolvedValue({
     PlaySessionId: 'play-session-1',
     MediaSources: [{
@@ -256,14 +276,14 @@ describe('integration: Phase 2 preference and Search restoration', () => {
     await screen.findByRole('heading', { name: 'PiggieTV' });
 
     fireEvent.click(screen.getByRole('button', { name: 'Search' }));
-    const input = await screen.findByPlaceholderText('Movies, shows, music, and books');
+    const input = await screen.findByPlaceholderText('Titles, people, music, genres, and studios');
     fireEvent.change(input, { target: { value: 'search movie' } });
     const result = await screen.findByRole('button', { name: /Search Movie/ });
     fireEvent.click(result);
     await screen.findByText('Search result overview');
 
     fireEvent.click(screen.getByRole('button', { name: 'Back' }));
-    const restoredInput = await screen.findByPlaceholderText('Movies, shows, music, and books');
+    const restoredInput = await screen.findByPlaceholderText('Titles, people, music, genres, and studios');
     expect((restoredInput as HTMLInputElement).value).toBe('search movie');
     const restoredResult = await screen.findByRole('button', { name: /Search Movie/ });
     await waitFor(() => {
@@ -276,6 +296,219 @@ describe('integration: Phase 2 preference and Search restoration', () => {
 
     await act(async () => refresh.resolve(searchResponse));
     await waitFor(() => expect(screen.queryByText('Searching…')).toBeNull());
+  });
+
+  it('renders the first useful All result while related branches continue with two-request fan-out', async () => {
+    seedSession();
+    const content = defer<{ Items: Array<Record<string, unknown>> }>();
+    const musicGenre = defer<{ Items: Array<Record<string, unknown>> }>();
+    const genre = defer<{ Items: Array<Record<string, unknown>> }>();
+    const studio = defer<{ Items: Array<Record<string, unknown>> }>();
+    mockGetSearch.mockReturnValue(content.promise);
+    mockGetSearchMusicGenres.mockReturnValue(musicGenre.promise);
+    mockGetSearchGenres.mockReturnValue(genre.promise);
+    mockGetSearchStudios.mockReturnValue(studio.promise);
+
+    render(<App />);
+    await screen.findByRole('heading', { name: 'PiggieTV' });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    fireEvent.change(screen.getByPlaceholderText('Titles, people, music, genres, and studios'), {
+      target: { value: 'rock' }
+    });
+
+    await waitFor(() => {
+      expect(mockGetSearch).toHaveBeenCalledTimes(1);
+      expect(mockGetSearchMusicGenres).toHaveBeenCalledTimes(1);
+    });
+    expect(mockGetSearchGenres).not.toHaveBeenCalled();
+    expect(mockGetSearchStudios).not.toHaveBeenCalled();
+
+    await act(async () => content.resolve({
+      Items: [{ Id: 'movie-rock', Name: 'Rock Movie', Type: 'Movie', ProductionYear: 2026 }]
+    }));
+    expect(await screen.findByRole('button', { name: 'Rock Movie, 2026' })).toBeTruthy();
+    expect(screen.getByText('Adding related matches…')).toBeTruthy();
+    await waitFor(() => expect(mockGetSearchGenres).toHaveBeenCalledTimes(1));
+    expect(mockGetSearchStudios).not.toHaveBeenCalled();
+
+    await act(async () => {
+      musicGenre.resolve({ Items: [{ Id: 'music-rock', Name: 'Rock', Type: 'MusicGenre' }] });
+      genre.resolve({ Items: [] });
+    });
+    await waitFor(() => expect(mockGetSearchStudios).toHaveBeenCalledTimes(1));
+    await act(async () => studio.resolve({ Items: [] }));
+
+    expect(await screen.findByRole('button', { name: 'Rock, Music genre' })).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText('Adding related matches…')).toBeNull());
+  });
+
+  it('keeps category return focus stable until every progressive refresh branch settles', async () => {
+    seedSession();
+    const refreshedGenre = defer<{ Items: Array<Record<string, unknown>> }>();
+    const refreshedMusicGenre = defer<{ Items: Array<Record<string, unknown>> }>();
+    mockGetSearchGenres
+      .mockResolvedValueOnce({ Items: [] })
+      .mockReturnValueOnce(refreshedGenre.promise);
+    mockGetSearchMusicGenres
+      .mockResolvedValueOnce({ Items: [{ Id: 'music-genre-rock', Name: 'Rock', Type: 'MusicGenre' }] })
+      .mockReturnValueOnce(refreshedMusicGenre.promise);
+    mockGetSearchCategoryItems.mockResolvedValue({
+      Items: [{ Id: 'album-rock-solid', Name: 'Rock Solid', Type: 'MusicAlbum', ProductionYear: 2026 }],
+      TotalRecordCount: 1
+    });
+
+    render(<App />);
+    await screen.findByRole('heading', { name: 'PiggieTV' });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    const toolbar = await screen.findByRole('toolbar', { name: 'Search filters' });
+    fireEvent.click(within(toolbar).getByRole('button', { name: 'Genres' }));
+    fireEvent.change(screen.getByPlaceholderText('Titles, people, music, genres, and studios'), {
+      target: { value: 'rock' }
+    });
+
+    const musicGenre = await screen.findByRole('button', { name: 'Rock, Music genre' });
+    await waitFor(() => expect(screen.queryByText('Adding related matches…')).toBeNull());
+    fireEvent.click(musicGenre);
+    await screen.findByRole('heading', { name: 'Rock' });
+    const album = await screen.findByRole('button', { name: 'Rock Solid, 2026' });
+    await waitFor(() => expect(document.activeElement).toBe(album));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    const restoredMusicGenre = await screen.findByRole('button', { name: 'Rock, Music genre' });
+    await waitFor(() => expect(document.activeElement).toBe(restoredMusicGenre));
+    await waitFor(() => {
+      expect(mockGetSearchGenres).toHaveBeenCalledTimes(2);
+      expect(mockGetSearchMusicGenres).toHaveBeenCalledTimes(2);
+    });
+
+    await act(async () => refreshedGenre.resolve({
+      Items: [{ Id: 'genre-rock', Name: 'Rock', Type: 'Genre' }]
+    }));
+    expect(await screen.findByRole('button', { name: 'Rock, Genre' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Rock, Music genre' })).toBe(restoredMusicGenre);
+    expect(document.activeElement).toBe(restoredMusicGenre);
+
+    await act(async () => refreshedMusicGenre.resolve({
+      Items: [{ Id: 'music-genre-rock', Name: 'Rock', Type: 'MusicGenre' }]
+    }));
+    await waitFor(() => expect(screen.queryByText('Adding related matches…')).toBeNull());
+    await waitFor(() => {
+      expect(restoredMusicGenre.classList.contains('is-focused')).toBe(true);
+      expect(document.activeElement).toBe(restoredMusicGenre);
+    });
+  });
+
+  it('searches typed genres and studios and opens each as a native focused catalog', async () => {
+    seedSession();
+    mockGetSearchGenres.mockResolvedValue({ Items: [{ Id: 'genre-drama', Name: 'Drama', Type: 'Genre' }] });
+    mockGetSearchMusicGenres.mockResolvedValue({
+      Items: [{ Id: 'music-genre-dream-pop', Name: 'Dream Pop', Type: 'MusicGenre' }]
+    });
+    mockGetSearchStudios.mockResolvedValue({
+      Items: [{ Id: 'studio-pixar', Name: 'Pixar', Type: 'Studio' }]
+    });
+    mockGetSearchCategoryItems.mockImplementation((_userId, _categoryId, kind) => Promise.resolve(kind === 'MusicGenre'
+      ? {
+          Items: [{ Id: 'album-night-drive', Name: 'Night Drive', Type: 'MusicAlbum', ProductionYear: 2026 }],
+          TotalRecordCount: 1
+        }
+      : {
+          Items: [{ Id: 'movie-luxo', Name: 'Luxo Jr.', Type: 'Movie', ProductionYear: 1986 }],
+          TotalRecordCount: 1
+        }));
+    mockGetItem.mockImplementation((_userId, itemId) => Promise.resolve(itemId === 'album-night-drive'
+      ? { Id: itemId, Name: 'Night Drive', Type: 'MusicAlbum', Overview: 'A premium album catalog result.' }
+      : { Id: itemId, Name: 'Luxo Jr.', Type: 'Movie', Overview: 'A studio catalog result.' }));
+
+    render(<App />);
+    await screen.findByRole('heading', { name: 'PiggieTV' });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+
+    const toolbar = await screen.findByRole('toolbar', { name: 'Search filters' });
+    expect(within(toolbar).getAllByRole('button').map(button => button.textContent)).toEqual([
+      'All', 'Movies', 'Shows', 'Episodes', 'Music', 'People', 'Collections', 'Reading', 'Genres', 'Studios'
+    ]);
+    expect(within(toolbar).getByRole('button', { name: 'Genres' }).getAttribute('data-focus-id')).toBe('search-filter-genres');
+    expect(within(toolbar).getByRole('button', { name: 'Studios' }).getAttribute('data-focus-id')).toBe('search-filter-studios');
+
+    fireEvent.click(within(toolbar).getByRole('button', { name: 'Genres' }));
+    const input = screen.getByPlaceholderText('Titles, people, music, genres, and studios');
+    fireEvent.change(input, { target: { value: 'dream' } });
+    const musicGenre = await screen.findByRole('button', { name: 'Dream Pop, Music genre' });
+    expect(mockGetSearchGenres).toHaveBeenCalledWith('user-1', 'dream', expect.any(AbortSignal));
+    expect(mockGetSearchMusicGenres).toHaveBeenCalledWith('user-1', 'dream', expect.any(AbortSignal));
+    expect(mockGetSearch).not.toHaveBeenCalled();
+    fireEvent.click(musicGenre);
+
+    await screen.findByRole('heading', { name: 'Dream Pop' });
+    expect(mockGetSearchCategoryItems).toHaveBeenCalledWith(
+      'user-1',
+      'music-genre-dream-pop',
+      'MusicGenre',
+      0,
+      16,
+      expect.any(AbortSignal),
+      'Dream Pop'
+    );
+    const album = await screen.findByRole('button', { name: 'Night Drive, 2026' });
+    await waitFor(() => {
+      expect(album.classList.contains('is-focused')).toBe(true);
+      expect(document.activeElement).toBe(album);
+    });
+    fireEvent.click(album);
+    await screen.findByText('A premium album catalog result.');
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    await screen.findByRole('heading', { name: 'Dream Pop' });
+    const restoredAlbum = await screen.findByRole('button', { name: 'Night Drive, 2026' });
+    await waitFor(() => expect(document.activeElement).toBe(restoredAlbum));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    const restoredToolbar = await screen.findByRole('toolbar', { name: 'Search filters' });
+    expect(within(restoredToolbar).getByRole('button', { name: 'Genres' }).getAttribute('aria-pressed')).toBe('true');
+    const restoredMusicGenre = await screen.findByRole('button', { name: 'Dream Pop, Music genre' });
+    await waitFor(() => {
+      expect(restoredMusicGenre.classList.contains('is-focused')).toBe(true);
+      expect(document.activeElement).toBe(restoredMusicGenre);
+    });
+    fireEvent.click(within(restoredToolbar).getByRole('button', { name: 'Studios' }));
+    fireEvent.change(screen.getByPlaceholderText('Titles, people, music, genres, and studios'), {
+      target: { value: 'pixar' }
+    });
+    const studio = await screen.findByRole('button', { name: 'Pixar, Studio' });
+    fireEvent.click(studio);
+    await screen.findByRole('heading', { name: 'Pixar' });
+    expect(mockGetSearchCategoryItems).toHaveBeenLastCalledWith(
+      'user-1',
+      'studio-pixar',
+      'Studio',
+      0,
+      16,
+      expect.any(AbortSignal),
+      'Pixar'
+    );
+    expect(await screen.findByRole('button', { name: 'Luxo Jr., 1986' })).toBeTruthy();
+  });
+
+  it('clears the category loading state when the Jellyfin catalog request rejects', async () => {
+    seedSession();
+    mockGetSearchMusicGenres.mockResolvedValue({
+      Items: [{ Id: 'music-genre-rock', Name: 'Rock', Type: 'MusicGenre' }]
+    });
+    mockGetSearchCategoryItems.mockRejectedValue(new Error('Category unavailable'));
+
+    render(<App />);
+    await screen.findByRole('heading', { name: 'PiggieTV' });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    const toolbar = await screen.findByRole('toolbar', { name: 'Search filters' });
+    fireEvent.click(within(toolbar).getByRole('button', { name: 'Genres' }));
+    fireEvent.change(screen.getByPlaceholderText('Titles, people, music, genres, and studios'), {
+      target: { value: 'rock' }
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'Rock, Music genre' }));
+
+    expect((await screen.findByRole('alert')).textContent).toContain('Category unavailable');
+    expect(screen.queryByText('Loading category')).toBeNull();
+    expect(screen.queryByLabelText('Loading Rock')).toBeNull();
   });
 });
 
@@ -503,6 +736,113 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
     await act(async () => refresh.resolve({ Items: [{ Id: 'movie-1', Name: 'Featured Movie', Type: 'Movie' }] }));
   });
 
+  it('shows movie quality and track presets, restores a related shelf, and starts with the selected streams', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+    seedSession();
+    mockGetResume.mockResolvedValue({ Items: [{ Id: 'movie-1', Name: 'Featured Movie', Type: 'Movie' }] });
+    const refreshedMovie = defer<Record<string, unknown>>();
+    let movieLoadCount = 0;
+    const movieDetails = {
+      Id: 'movie-1',
+      Name: 'Featured Movie',
+      Type: 'Movie',
+      Overview: 'Overview',
+      MediaSources: [{
+        Id: 'source-1',
+        Container: 'mkv',
+        VideoCodec: 'hevc',
+        AudioCodec: 'eac3',
+        MediaStreams: [
+          { Index: 0, Type: 'Video', Codec: 'hevc', Width: 3840, Height: 2160, VideoRangeType: 'HDR10' },
+          { Index: 2, Type: 'Audio', DisplayTitle: 'English - Dolby Digital+ - 5.1', Codec: 'eac3', Channels: 6, IsDefault: true },
+          { Index: 4, Type: 'Subtitle', DisplayTitle: 'English - SUBRIP', Codec: 'subrip', IsDefault: true }
+        ]
+      }]
+    };
+    mockGetItem.mockImplementation((_userId: string, itemId: string) => {
+      if (itemId === 'related-1') {
+        return Promise.resolve({
+          Id: 'related-1',
+          Name: 'Related Movie',
+          Type: 'Movie',
+          Overview: 'A related movie overview.'
+        });
+      }
+      movieLoadCount += 1;
+      return movieLoadCount === 1 ? Promise.resolve(movieDetails) : refreshedMovie.promise;
+    });
+    mockGetSimilarItems.mockImplementation((_userId: string, itemId: string) => Promise.resolve({
+      Items: itemId === 'movie-1'
+        ? [{ Id: 'related-1', Name: 'Related Movie', Type: 'Movie', ProductionYear: 2025 }]
+        : []
+    }));
+    mockGetPlaybackInfo.mockResolvedValue({
+      PlaySessionId: 'play-session-1',
+      MediaSources: [{
+        Id: 'source-1',
+        Container: 'mkv',
+        VideoCodec: 'hevc',
+        AudioCodec: 'eac3',
+        SupportsDirectPlay: true,
+        SupportsDirectStream: true,
+        SupportsTranscoding: true,
+        MediaStreams: [
+          { Index: 0, Type: 'Video', Codec: 'hevc' },
+          { Index: 2, Type: 'Audio', DisplayTitle: 'English - Dolby Digital+ - 5.1', Codec: 'eac3', Channels: 6, IsDefault: true },
+          { Index: 4, Type: 'Subtitle', DisplayTitle: 'English - SUBRIP', Codec: 'subrip', IsDefault: true }
+        ]
+      }]
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Featured Movie' }));
+    await screen.findByText('Overview');
+    const quality = screen.getByRole('list', { name: 'Media quality' });
+    expect(within(quality).getByText('4K UHD')).toBeTruthy();
+    expect(within(quality).getByText('HDR10')).toBeTruthy();
+    expect(within(quality).getByText('HEVC')).toBeTruthy();
+    expect(within(quality).getByText('5.1')).toBeTruthy();
+    expect((await screen.findByRole('button', { name: /^Audio: English - Dolby Digital\+ - 5\.1/ }) as HTMLButtonElement).disabled).toBe(true);
+
+    const subtitlePreset = await screen.findByRole('button', { name: /^Subtitles: English - SUBRIP/ });
+    fireEvent.click(subtitlePreset);
+    expect(screen.getByRole('button', { name: /^Subtitles: Off\./ })).toBeTruthy();
+
+    const related = await screen.findByRole('button', { name: 'Related Movie, 2025' });
+    fireEvent.focus(related);
+    expect(document.querySelector('.ptv-details__content')?.classList.contains('is-related-active')).toBe(true);
+    fireEvent.click(related);
+    await screen.findByText('A related movie overview.');
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+
+    const restoredRelated = await screen.findByRole('button', { name: 'Related Movie, 2025' });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(restoredRelated);
+      expect(restoredRelated.classList.contains('is-focused')).toBe(true);
+      expect(document.querySelector('.ptv-details__content')?.classList.contains('is-related-active')).toBe(true);
+    });
+    expect(mockGetSimilarItems.mock.calls.filter(call => call[1] === 'movie-1')).toHaveLength(1);
+
+    const playButton = screen.getByRole('button', { name: /^play$/i });
+    fireEvent.focus(playButton);
+    await act(async () => refreshedMovie.resolve(movieDetails));
+    await waitFor(() => {
+      expect(document.activeElement).toBe(playButton);
+      expect(document.querySelector('.ptv-details__content')?.classList.contains('is-related-active')).toBe(false);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /^Subtitles: English - SUBRIP/ }));
+    expect(screen.getByRole('button', { name: /^Subtitles: Off\./ })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /^play$/i }));
+    await waitFor(() => expect(mockGetPlaybackInfo).toHaveBeenCalled());
+    expect(mockGetPlaybackInfo.mock.calls[0]?.[2]).toEqual(expect.objectContaining({
+      audioStreamIndex: 2,
+      subtitleStreamIndex: null
+    }));
+  });
+
   it('loads only the selected Series season and starts playback with the episode ID', async () => {
     const load = vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
     vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
@@ -521,8 +861,9 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
     });
     mockGetSeasons.mockResolvedValue({
       Items: [
-        { Id: 'season-1', Name: 'Season 1', Type: 'Season' },
-        { Id: 'season-2', Name: 'Season 2', Type: 'Season' }
+        { Id: 'season-empty', Name: 'Season 0', Type: 'Season', RecursiveItemCount: 0 },
+        { Id: 'season-1', Name: 'Season 1', Type: 'Season', RecursiveItemCount: 1 },
+        { Id: 'season-2', Name: 'Season 2', Type: 'Season', RecursiveItemCount: 9 }
       ]
     });
     mockGetEpisodes.mockImplementation((_userId: string, _seriesId: string, seasonId: string) => Promise.resolve({
@@ -554,6 +895,7 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'The PTV Show' }));
     const firstSeason = await screen.findByRole('button', { name: 'Season 1' });
+    expect(screen.queryByRole('button', { name: 'Season 0' })).toBeNull();
     await screen.findByRole('button', { name: /^Pilot,/ });
     await waitFor(() => expect(document.activeElement).toBe(firstSeason));
 
@@ -611,6 +953,47 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
     const fallbackSeason = await screen.findByRole('button', { name: 'Season 1' });
     await waitFor(() => expect(document.activeElement).toBe(fallbackSeason));
     expect(screen.getByText('1 / 2')).toBeTruthy();
+  });
+
+  it('rechecks an empty episode response instead of trapping it in the media cache', async () => {
+    seedSession();
+    mockGetRecentlyAdded.mockImplementation((_userId: string, itemType: string) => Promise.resolve({
+      Items: itemType === 'Series'
+        ? [{ Id: 'series-retry', Name: 'Retry Show', Type: 'Series', RecursiveItemCount: 1 }]
+        : []
+    }));
+    mockGetItem.mockResolvedValue({
+      Id: 'series-retry',
+      Name: 'Retry Show',
+      Type: 'Series',
+      RecursiveItemCount: 1
+    });
+    mockGetSeasons.mockResolvedValue({
+      Items: [{ Id: 'season-retry', Name: 'Season 1', Type: 'Season', RecursiveItemCount: 1 }]
+    });
+    mockGetEpisodes
+      .mockResolvedValueOnce({ Items: [] })
+      .mockResolvedValueOnce({
+        Items: [{
+          Id: 'episode-recovered',
+          Name: 'Recovered Episode',
+          Type: 'Episode',
+          SeriesName: 'Retry Show',
+          ParentIndexNumber: 1,
+          IndexNumber: 1
+        }]
+      });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry Show' }));
+    const recheck = await screen.findByRole('button', { name: 'Check again' });
+    expect(screen.getByText('No indexed episodes are available for this season.')).toBeTruthy();
+    expect(mockGetEpisodes).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(recheck);
+    await screen.findByRole('button', { name: /^Recovered Episode,/ });
+    expect(mockGetEpisodes).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('button', { name: 'Check again' })).toBeNull();
   });
 
   it('pages Movies in bounded sets of 16 and restores the selected page/card after Details', async () => {

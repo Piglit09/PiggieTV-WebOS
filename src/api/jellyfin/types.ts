@@ -41,10 +41,21 @@ export interface PtvPlaybackSourceStream {
   Index?: number;
   Type: 'Audio' | 'Video' | 'Subtitle';
   DisplayTitle?: string | null;
+  Title?: string | null;
   Codec?: string | null;
   Language?: string | null;
   DeliveryMethod?: string | null;
   IsDefault?: boolean;
+  IsForced?: boolean;
+  IsExternal?: boolean;
+  Width?: number | null;
+  Height?: number | null;
+  BitRate?: number | null;
+  Profile?: string | null;
+  VideoRange?: string | null;
+  VideoRangeType?: string | null;
+  ChannelLayout?: string | null;
+  Channels?: number | null;
 }
 
 export interface PtvPlaybackMediaSource {

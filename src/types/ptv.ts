@@ -1,4 +1,5 @@
 export type PtvFocusDirection = 'up' | 'down' | 'left' | 'right';
+export type PtvSearchCategoryKind = 'Genre' | 'MusicGenre' | 'Studio';
 export type PtvItemKind =
   | 'Movie'
   | 'Series'
@@ -11,6 +12,9 @@ export type PtvItemKind =
   | 'MusicVideo'
   | 'Book'
   | 'Playlist'
+  | 'Genre'
+  | 'MusicGenre'
+  | 'Studio'
   | 'Game'
   | 'PhotoAlbum'
   | 'Folder'
@@ -44,6 +48,8 @@ export interface PtvItem {
   parentId?: string;
   indexNumber?: number;
   parentIndexNumber?: number;
+  childCount?: number;
+  recursiveItemCount?: number;
 
   productionYear?: number;
   premiereDate?: string;
@@ -66,22 +72,34 @@ export interface PtvItem {
 export interface PtvMediaStreamInfo {
   id?: string;
   index?: number;
+  type?: 'Video' | 'Audio' | 'Subtitle';
   container?: string;
   codec?: string;
   language?: string;
   title?: string;
+  displayTitle?: string;
+  bitrate?: number;
+  width?: number;
+  height?: number;
+  profile?: string;
+  videoRange?: string;
+  videoRangeType?: string;
+  channelLayout?: string;
   channelCount?: number;
   isDefault?: boolean;
   isForced?: boolean;
   isExternal?: boolean;
   isVideoStream?: boolean;
   isAudioStream?: boolean;
+  isSubtitleStream?: boolean;
 }
 
 export interface PtvMediaSource {
   id?: string;
   container?: string;
   codec?: string;
+  videoCodec?: string;
+  audioCodec?: string;
   isRemote?: boolean;
   bitrate?: number;
   width?: number;
@@ -99,6 +117,7 @@ export interface PtvPlaybackQueueItem {
   artist?: string;
   album?: string;
   albumId?: string;
+  logoUrl?: string;
   artworkUrl?: string;
 }
 
@@ -145,6 +164,7 @@ export interface PtvPlaybackIntent {
   artist?: string;
   album?: string;
   albumId?: string;
+  logoUrl?: string;
   artworkUrl?: string;
   startPositionTicks?: number;
   audioStreamIndex?: number | null;

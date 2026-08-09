@@ -260,7 +260,9 @@ export function HomeScreen() {
           response = await client.getRecentlyAdded(userSession.userId, 'Series', 16, controller.signal);
         }
         if (!active || controller.signal.aborted) return;
-        const items = mapPtvItems(response);
+        const items = mapPtvItems(response, {
+          excludeEmptyVideoContainers: sectionId === 'shows'
+        });
         writeHomeCacheSection(homeCacheKey, sectionId, items);
         setSections(previous => previous.map(section => section.id === sectionId ? {
           ...section,

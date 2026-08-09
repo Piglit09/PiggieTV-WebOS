@@ -312,6 +312,71 @@ describe('FocusManager', () => {
     expect(document.activeElement).toBe(detailsPrimary);
   });
 
+  it('preserves a source card restore when a shell control re-registers for the destination route', () => {
+    const manager = new FocusManager();
+    const searchResult = createFocusNode('search-result-rock', {
+      left: 0,
+      top: 120,
+      right: 160,
+      bottom: 360,
+      width: 160,
+      height: 240
+    });
+    const searchShell = createFocusNode('shell-home-search', {
+      left: 0,
+      top: 0,
+      right: 120,
+      bottom: 60,
+      width: 120,
+      height: 60
+    });
+    const categoryShell = createFocusNode('shell-home-category', {
+      left: 0,
+      top: 0,
+      right: 120,
+      bottom: 60,
+      width: 120,
+      height: 60
+    });
+
+    manager.setActiveRoute('search');
+    const removeResult = manager.register({ id: 'search-result-rock', routeId: 'search', ref: searchResult });
+    manager.register({ id: 'shell-home', routeId: 'search', ref: searchShell });
+    manager.focus('search-result-rock');
+    expect(manager.getRememberedRouteFocus('search')).toBe('search-result-rock');
+
+    removeResult();
+    expect(manager.focusId).toBe('shell-home');
+    manager.register({
+      id: 'shell-home',
+      routeId: 'search:category-rock',
+      ref: categoryShell
+    });
+    manager.setActiveRoute('search:category-rock', { fallbackFocusId: 'shell-back-search' });
+
+    expect(manager.getRememberedRouteFocus('search')).toBe('search-result-rock');
+
+    manager.setActiveRoute('search');
+    const restoredResult = createFocusNode('search-result-rock-restored', {
+      left: 0,
+      top: 120,
+      right: 160,
+      bottom: 360,
+      width: 160,
+      height: 240
+    });
+    manager.register({ id: 'search-result-rock', routeId: 'search', ref: restoredResult });
+
+    expect(manager.focusId).toBe('search-result-rock');
+    expect(document.activeElement).toBe(restoredResult);
+    expect(manager.lastTransition).toMatchObject({
+      routeId: 'search',
+      nextFocusId: 'search-result-rock',
+      reason: 'route-restore',
+      fallbackUsed: false
+    });
+  });
+
   it('emits diagnostics metadata for directional input', () => {
     const manager = new FocusManager();
     const left = createFocusNode('left', { left: 0, top: 0, right: 100, bottom: 80, width: 100, height: 80 });

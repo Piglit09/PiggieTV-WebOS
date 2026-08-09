@@ -117,6 +117,7 @@ export class FocusManager {
   private pendingRouteRestore: PendingRouteRestore | null = null;
   private routeFocusMemory = new Map<string, string>();
   private readonly maxHistory = 18;
+  private lastPreviousFocusId: string | null = null;
 
   public register(node: FocusNodeRegistration): () => void {
     node.ref.tabIndex = -1;
@@ -217,8 +218,10 @@ export class FocusManager {
   }
 
   public get previousFocusId() {
-    if (this.focusOrder.length < 2) return null;
-    return this.focusOrder[this.focusOrder.length - 2] ?? null;
+    if (this.focusOrder.length >= 2) {
+      return this.focusOrder[this.focusOrder.length - 2] ?? null;
+    }
+    return this.lastPreviousFocusId;
   }
 
   public get activeRoute() {
@@ -243,7 +246,12 @@ export class FocusManager {
     // using the node's freshly updated route would poison the new route's memory.
     const previousRouteId = this.activeRouteId ?? previousNode?.routeId;
 
-    if (previous && previousRouteId) {
+    // During a route render, persistent shell controls can re-register for the
+    // destination before this effect runs. Do not let that destination node
+    // replace the source route's remembered content focus.
+    const previousBelongsToPreviousRoute = !previousNode?.routeId
+      || previousNode.routeId === previousRouteId;
+    if (previous && previousRouteId && previousBelongsToPreviousRoute) {
       this.rememberRouteFocus(previousRouteId, previous);
     }
 
@@ -562,6 +570,9 @@ export class FocusManager {
     }
 
     const previousNode = previous ? this.nodes.get(previous) : undefined;
+    if (previous) {
+      this.lastPreviousFocusId = previous;
+    }
     this.currentFocus = id;
     this.lastInteractive = id;
     this.pushHistory(id);

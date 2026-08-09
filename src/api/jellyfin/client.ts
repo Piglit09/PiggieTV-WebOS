@@ -1,7 +1,7 @@
 import { requestJson, type JellyfinAuthorizationContext, type RequestConfig } from '../http/http';
 import type { PtvAuthenticateResponse, PtvPlaybackInfoResponse, PtvServerIdentity, PtvSystemInfo } from './types';
 import { normalizeServerUrl } from './normalizeUrl';
-import type { PtvCapability } from '../../types/ptv';
+import type { PtvCapability, PtvSearchCategoryKind } from '../../types/ptv';
 import { mapStatusToErrorKind, toPtvError } from '../../core/errors';
 import type { RequestTracker } from '../../core/requestTracker';
 import {
@@ -40,6 +40,84 @@ export interface PtvQuickConnectStateResponse {
 
 type RequestExtras = Omit<Partial<RequestConfig>, 'method' | 'body' | 'timeoutMs' | 'signal'>;
 
+const EPISODE_FIELDS = 'ImageTags,Overview,RunTimeTicks,SeriesName,SeasonName,IndexNumber,ParentIndexNumber,UserData,SeriesId,SeasonId,ParentId';
+const SEARCH_TAXONOMY_TIMEOUT_MS = 2_500;
+const SEARCH_TAXONOMY_EXACT_TIMEOUT_MS = 6_000;
+const SEARCH_CATEGORY_TIMEOUT_MS = 8_000;
+const SEARCH_RESPONSE_CACHE_TTL_MS = 60_000;
+const SEARCH_TIMEOUT_CACHE_TTL_MS = 15_000;
+const SEARCH_RESPONSE_CACHE_LIMIT = 64;
+
+type PtvItemsResponse = { Items: Array<Record<string, unknown>>; TotalRecordCount?: number };
+
+interface SearchResponseCacheEntry {
+  expiresAt: number;
+  value: PtvItemsResponse;
+}
+
+function getRequestErrorDetails(cause: unknown) {
+  if (!cause || typeof cause !== 'object') return { kind: '', code: null };
+  const candidate = cause as { kind?: unknown; code?: unknown; status?: unknown };
+  const code = typeof candidate.code === 'number'
+    ? candidate.code
+    : typeof candidate.status === 'number' ? candidate.status : null;
+  return {
+    kind: typeof candidate.kind === 'string' ? candidate.kind : '',
+    code
+  };
+}
+
+function normalizeEpisodeRelationships(
+  response: { Items: Array<Record<string, unknown>>; TotalRecordCount?: number },
+  seriesId: string,
+  seasonId: string
+) {
+  const items = Array.isArray(response.Items) ? response.Items : [];
+  return {
+    ...response,
+    Items: items.map(item => {
+      const itemType = typeof item.Type === 'string' ? item.Type.trim().toLowerCase() : '';
+      if (itemType !== 'episode') return item;
+      const parentId = typeof item.ParentId === 'string' && item.ParentId.trim()
+        ? item.ParentId.trim()
+        : seasonId;
+      const normalizedSeriesId = typeof item.SeriesId === 'string' && item.SeriesId.trim()
+        ? item.SeriesId.trim()
+        : seriesId;
+      const normalizedSeasonId = typeof item.SeasonId === 'string' && item.SeasonId.trim()
+        ? item.SeasonId.trim()
+        : parentId;
+      return {
+        ...item,
+        ParentId: parentId,
+        SeriesId: normalizedSeriesId,
+        SeasonId: normalizedSeasonId
+      };
+    })
+  };
+}
+
+function normalizeSearchCategoryResponse(
+  response: { Items: Array<Record<string, unknown>>; TotalRecordCount?: number },
+  kind: PtvSearchCategoryKind,
+  query: string
+) {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  return {
+    ...response,
+    Items: (Array.isArray(response.Items) ? response.Items : [])
+      .map((item): Record<string, unknown> => ({
+        ...item,
+        Type: typeof item.Type === 'string' && item.Type.trim() ? item.Type : kind
+      }))
+      .filter(item => {
+        const name = typeof item.Name === 'string' ? item.Name.trim().toLocaleLowerCase() : '';
+        return Boolean(name) && (!normalizedQuery || name.includes(normalizedQuery));
+      })
+      .slice(0, 16)
+  };
+}
+
 export class JellyfinApiClient {
   private baseUrl: string;
   private accessToken?: string;
@@ -47,6 +125,7 @@ export class JellyfinApiClient {
   private headers: Record<string, string>;
   private readonly requestTracker?: RequestTracker;
   private readonly requestCategory = 'jellyfin';
+  private readonly searchResponseCache = new Map<string, SearchResponseCacheEntry>();
 
   constructor(config: JellyfinTransportConfig) {
     this.baseUrl = normalizeServerUrl(config.baseUrl);
@@ -54,18 +133,21 @@ export class JellyfinApiClient {
     this.deviceId = config.deviceId;
     this.requestTracker = config.requestTracker;
     this.headers = {
-      'X-Application-Name': 'PiggieTV',
-      'X-Application-Version': '0.1.0',
-      'User-Agent': 'PTV-webOS/0.1.0'
+      'X-Application-Name': PTV_APPLICATION_NAME,
+      'X-Application-Version': PTV_APPLICATION_VERSION,
+      'User-Agent': `PTV-webOS/${PTV_APPLICATION_VERSION}`
     };
   }
 
   public setAccessToken(token: string | undefined) {
+    if (this.accessToken !== token) this.searchResponseCache.clear();
     this.accessToken = token;
   }
 
   public setServer(baseUrl: string) {
-    this.baseUrl = normalizeServerUrl(baseUrl);
+    const normalized = normalizeServerUrl(baseUrl);
+    if (this.baseUrl !== normalized) this.searchResponseCache.clear();
+    this.baseUrl = normalized;
   }
 
   public getServerUrl() {
@@ -88,6 +170,33 @@ export class JellyfinApiClient {
 
   private withPath(path: string) {
     return `${this.baseUrl}/${path.replace(/^\/+/, '')}`;
+  }
+
+  private readSearchResponseCache(key: string) {
+    const cached = this.searchResponseCache.get(key);
+    if (!cached) return null;
+    if (cached.expiresAt <= Date.now()) {
+      this.searchResponseCache.delete(key);
+      return null;
+    }
+    this.searchResponseCache.delete(key);
+    this.searchResponseCache.set(key, cached);
+    return cached.value;
+  }
+
+  private writeSearchResponseCache(
+    key: string,
+    value: PtvItemsResponse,
+    ttlMs = SEARCH_RESPONSE_CACHE_TTL_MS
+  ) {
+    this.searchResponseCache.delete(key);
+    this.searchResponseCache.set(key, { expiresAt: Date.now() + ttlMs, value });
+    while (this.searchResponseCache.size > SEARCH_RESPONSE_CACHE_LIMIT) {
+      const oldest = this.searchResponseCache.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.searchResponseCache.delete(oldest);
+    }
+    return value;
   }
 
   private async get<T>(
@@ -259,6 +368,48 @@ export class JellyfinApiClient {
     );
   }
 
+  public getSimilarItems(
+    sessionUserId: string,
+    itemId: string,
+    options: { limit?: number; fields?: string[] } = {},
+    signal?: AbortSignal
+  ) {
+    return this.get<{ Items: Array<Record<string, unknown>>; TotalRecordCount?: number }>(
+      `Items/${encodeURIComponent(itemId)}/Similar`,
+      {
+        UserId: sessionUserId,
+        Limit: Math.max(1, Math.min(64, options.limit ?? 16)),
+        Fields: options.fields?.join(','),
+        EnableUserData: true,
+        EnableTotalRecordCount: false
+      },
+      undefined,
+      signal,
+      { requestRoute: 'GET Items/{item}/Similar' }
+    );
+  }
+
+  public getInstantMix(
+    sessionUserId: string,
+    itemId: string,
+    options: { limit?: number; fields?: string[] } = {},
+    signal?: AbortSignal
+  ) {
+    return this.get<{ Items: Array<Record<string, unknown>>; TotalRecordCount?: number }>(
+      `Items/${encodeURIComponent(itemId)}/InstantMix`,
+      {
+        UserId: sessionUserId,
+        Limit: Math.max(1, Math.min(64, options.limit ?? 48)),
+        Fields: options.fields?.join(','),
+        EnableUserData: true,
+        EnableTotalRecordCount: false
+      },
+      undefined,
+      signal,
+      { requestRoute: 'GET Items/{item}/InstantMix' }
+    );
+  }
+
   public getResume(sessionUserId: string, itemTypes: string, limit = 12, signal?: AbortSignal) {
     return this.get<{ Items: Array<Record<string, unknown>> }>(`Users/${encodeURIComponent(sessionUserId)}/Items/Resume`, {
       IncludeItemTypes: itemTypes,
@@ -306,7 +457,7 @@ export class JellyfinApiClient {
       `Shows/${encodeURIComponent(seriesId)}/Seasons`,
       {
         UserId: sessionUserId,
-        Fields: 'ImageTags,Overview,ProductionYear,PremiereDate,EndDate,Status,UserData',
+        Fields: 'ImageTags,Overview,ProductionYear,PremiereDate,EndDate,Status,UserData,ChildCount,RecursiveItemCount',
         EnableUserData: true
       },
       undefined,
@@ -315,25 +466,50 @@ export class JellyfinApiClient {
     );
   }
 
-  public getEpisodes(
+  public async getEpisodes(
     sessionUserId: string,
     seriesId: string,
     seasonId: string,
     signal?: AbortSignal
   ) {
-    return this.get<{ Items: Array<Record<string, unknown>>; TotalRecordCount?: number }>(
-      `Shows/${encodeURIComponent(seriesId)}/Episodes`,
+    let primaryResponse: { Items: Array<Record<string, unknown>>; TotalRecordCount?: number } | null = null;
+    try {
+      primaryResponse = await this.get<{ Items: Array<Record<string, unknown>>; TotalRecordCount?: number }>(
+        `Shows/${encodeURIComponent(seriesId)}/Episodes`,
+        {
+          UserId: sessionUserId,
+          SeasonId: seasonId,
+          Fields: EPISODE_FIELDS,
+          EnableUserData: true,
+          EnableTotalRecordCount: false
+        },
+        undefined,
+        signal,
+        { requestRoute: 'GET Shows/{series}/Episodes' }
+      );
+    } catch (cause) {
+      if (signal?.aborted) throw cause;
+    }
+
+    if (primaryResponse && Array.isArray(primaryResponse.Items) && primaryResponse.Items.length > 0) {
+      return normalizeEpisodeRelationships(primaryResponse, seriesId, seasonId);
+    }
+
+    const fallbackResponse = await this.get<{ Items: Array<Record<string, unknown>>; TotalRecordCount?: number }>(
+      `Users/${encodeURIComponent(sessionUserId)}/Items`,
       {
-        UserId: sessionUserId,
-        SeasonId: seasonId,
-        Fields: 'ImageTags,Overview,RunTimeTicks,SeriesName,SeasonName,IndexNumber,ParentIndexNumber,UserData',
+        ParentId: seasonId,
+        IncludeItemTypes: 'Episode',
+        Recursive: true,
+        Fields: EPISODE_FIELDS,
         EnableUserData: true,
         EnableTotalRecordCount: false
       },
       undefined,
       signal,
-      { requestRoute: 'GET Shows/{series}/Episodes' }
+      { requestRoute: 'GET Users/{user}/Items (season episode fallback)' }
     );
+    return normalizeEpisodeRelationships(fallbackResponse, seriesId, seasonId);
   }
 
   public getRecentlyAdded(sessionUserId: string, includeType: string, limit = 16, signal?: AbortSignal) {
@@ -344,7 +520,7 @@ export class JellyfinApiClient {
         SortOrder: 'Descending',
         IncludeItemTypes: includeType,
         Limit: limit,
-        Fields: 'ImageTags,BackdropImageTags,Overview,ProductionYear,RunTimeTicks,OfficialRating,CommunityRating,Genres,UserData',
+        Fields: 'ImageTags,BackdropImageTags,Overview,ProductionYear,RunTimeTicks,OfficialRating,CommunityRating,Genres,UserData,ChildCount,RecursiveItemCount',
         Recursive: true,
         EnableUserData: true,
         EnableTotalRecordCount: false
@@ -354,21 +530,194 @@ export class JellyfinApiClient {
     );
   }
 
-  public getSearch(sessionUserId: string, query: string, include = 'Movie,Series,MusicAlbum,Audio,MusicVideo,MusicArtist,Playlist,Book', signal?: AbortSignal) {
-    return this.get<{ Items: Array<Record<string, unknown>>; TotalRecordCount?: number }>(
+  public async getSearch(sessionUserId: string, query: string, include = 'Movie,Series,MusicAlbum,Audio,MusicVideo,MusicArtist,Playlist,Book', signal?: AbortSignal) {
+    const cacheKey = `content\u0000${sessionUserId}\u0000${include}\u0000${query.trim().toLocaleLowerCase()}`;
+    const cached = this.readSearchResponseCache(cacheKey);
+    if (cached) return cached;
+    const response = await this.get<PtvItemsResponse>(
       `Users/${encodeURIComponent(sessionUserId)}/Items`,
       {
         SearchTerm: query,
         Recursive: true,
         IncludeItemTypes: include,
         Limit: 16,
-        Fields: 'ImageTags,ProductionYear,RunTimeTicks,SeriesName,IndexNumber,Overview,Genres',
+        Fields: 'ImageTags,ProductionYear,RunTimeTicks,SeriesName,IndexNumber,Overview,Genres,ChildCount,RecursiveItemCount',
         SortBy: 'SortName',
         SortOrder: 'Ascending'
       },
       undefined,
       signal
     );
+    return this.writeSearchResponseCache(cacheKey, response);
+  }
+
+  private async getSearchCategoryIndex(
+    sessionUserId: string,
+    query: string,
+    kind: PtvSearchCategoryKind,
+    signal?: AbortSignal
+  ) {
+    const endpoint = kind === 'Genre' ? 'Genres' : kind === 'MusicGenre' ? 'MusicGenres' : 'Studios';
+    const trimmedQuery = query.trim();
+    const cacheKey = `taxonomy\u0000${sessionUserId}\u0000${kind}\u0000${trimmedQuery.toLocaleLowerCase()}`;
+    const cached = this.readSearchResponseCache(cacheKey);
+    if (cached) return cached;
+
+    if (trimmedQuery) {
+      try {
+        const exact = await this.get<Record<string, unknown>>(
+          `${endpoint}/${encodeURIComponent(trimmedQuery)}`,
+          { UserId: sessionUserId },
+          SEARCH_TAXONOMY_EXACT_TIMEOUT_MS,
+          signal,
+          { retries: 0, requestRoute: `GET ${endpoint}/{name} (search taxonomy exact)` }
+        );
+        const normalizedExact = normalizeSearchCategoryResponse(
+          { Items: [exact], TotalRecordCount: 1 },
+          kind,
+          trimmedQuery
+        );
+        if (normalizedExact.Items.length) return this.writeSearchResponseCache(cacheKey, normalizedExact);
+      } catch (cause) {
+        if (signal?.aborted) throw cause;
+        const { kind: errorKind, code } = getRequestErrorDetails(cause);
+        if (errorKind === 'cancelled-request') throw cause;
+        if (errorKind === 'request-timeout') {
+          return this.writeSearchResponseCache(
+            cacheKey,
+            { Items: [], TotalRecordCount: 0 },
+            SEARCH_TIMEOUT_CACHE_TTL_MS
+          );
+        }
+        if (code !== 404 && code !== 410) throw cause;
+      }
+    }
+
+    try {
+      const response = await this.get<PtvItemsResponse>(
+        endpoint,
+        {
+          UserId: sessionUserId,
+          SearchTerm: trimmedQuery,
+          StartIndex: 0,
+          Limit: 48,
+          EnableImages: true,
+          EnableImageTypes: 'Primary,Thumb',
+          ImageTypeLimit: 1,
+          Fields: 'PrimaryImageAspectRatio,SortName',
+          EnableUserData: false,
+          EnableTotalRecordCount: false,
+          SortBy: 'SortName',
+          SortOrder: 'Ascending'
+        },
+        SEARCH_TAXONOMY_TIMEOUT_MS,
+        signal,
+        { retries: 0, requestRoute: `GET ${endpoint} (search taxonomy)` }
+      );
+      return this.writeSearchResponseCache(
+        cacheKey,
+        normalizeSearchCategoryResponse(response, kind, trimmedQuery)
+      );
+    } catch (cause) {
+      if (signal?.aborted) throw cause;
+      const { kind: errorKind } = getRequestErrorDetails(cause);
+      if (errorKind === 'request-timeout') {
+        return this.writeSearchResponseCache(
+          cacheKey,
+          { Items: [], TotalRecordCount: 0 },
+          SEARCH_TIMEOUT_CACHE_TTL_MS
+        );
+      }
+      throw cause;
+    }
+  }
+
+  public getSearchGenres(sessionUserId: string, query: string, signal?: AbortSignal) {
+    return this.getSearchCategoryIndex(sessionUserId, query, 'Genre', signal);
+  }
+
+  public getSearchMusicGenres(sessionUserId: string, query: string, signal?: AbortSignal) {
+    return this.getSearchCategoryIndex(sessionUserId, query, 'MusicGenre', signal);
+  }
+
+  public getSearchStudios(sessionUserId: string, query: string, signal?: AbortSignal) {
+    return this.getSearchCategoryIndex(sessionUserId, query, 'Studio', signal);
+  }
+
+  public async getSearchCategoryItems(
+    sessionUserId: string,
+    categoryId: string,
+    kind: PtvSearchCategoryKind,
+    startIndex = 0,
+    limit = 16,
+    signal?: AbortSignal,
+    categoryName?: string
+  ) {
+    const normalizedName = categoryName?.trim();
+    const cacheKey = [
+      'category',
+      sessionUserId,
+      kind,
+      categoryId,
+      normalizedName?.toLocaleLowerCase() ?? '',
+      Math.max(0, Math.floor(startIndex)),
+      Math.max(1, Math.min(32, Math.floor(limit)))
+    ].join('\u0000');
+    const cached = this.readSearchResponseCache(cacheKey);
+    if (cached) return cached;
+    const musicGenre = kind === 'MusicGenre';
+    const baseParams: Record<string, string | number | boolean | undefined> = {
+      StartIndex: Math.max(0, Math.floor(startIndex)),
+      Limit: Math.max(1, Math.min(32, Math.floor(limit))),
+      IncludeItemTypes: musicGenre ? 'MusicAlbum' : 'Movie,Series',
+      Recursive: true,
+      SortBy: 'SortName',
+      SortOrder: 'Ascending',
+      Fields: musicGenre
+        ? 'ImageTags,ProductionYear'
+        : 'ImageTags,ProductionYear,UserData,ChildCount,RecursiveItemCount',
+      EnableUserData: true,
+      EnableTotalRecordCount: false
+    };
+    const getItems = (params: Record<string, string | number | boolean | undefined>, requestRoute: string) => this.get<{
+      Items: Array<Record<string, unknown>>;
+      TotalRecordCount?: number;
+    }>(
+      `Users/${encodeURIComponent(sessionUserId)}/Items`,
+      params,
+      SEARCH_CATEGORY_TIMEOUT_MS,
+      signal,
+      { retries: 0, requestRoute }
+    );
+
+    if (normalizedName) {
+      try {
+        const byName = await getItems(
+          {
+            ...baseParams,
+            Genres: kind === 'Studio' ? undefined : normalizedName,
+            Studios: kind === 'Studio' ? normalizedName : undefined
+          },
+          'GET Users/{user}/Items (search category by name)'
+        );
+        if (Array.isArray(byName.Items) && byName.Items.length) {
+          return this.writeSearchResponseCache(cacheKey, { ...byName, TotalRecordCount: undefined });
+        }
+      } catch (cause) {
+        const { kind: errorKind } = getRequestErrorDetails(cause);
+        if (errorKind === 'request-timeout' || errorKind === 'cancelled-request') throw cause;
+      }
+    }
+
+    const byId = await getItems(
+      {
+        ...baseParams,
+        GenreIds: kind === 'Studio' ? undefined : categoryId,
+        StudioIds: kind === 'Studio' ? categoryId : undefined
+      },
+      'GET Users/{user}/Items (search category by id)'
+    );
+    return this.writeSearchResponseCache(cacheKey, { ...byId, TotalRecordCount: undefined });
   }
 
   public getPlaybackInfo(
@@ -377,7 +726,7 @@ export class JellyfinApiClient {
     options: {
       profile?: Record<string, unknown>;
       audioStreamIndex?: number;
-      subtitleStreamIndex?: number;
+      subtitleStreamIndex?: number | null;
       enableDirectPlay?: boolean;
       enableDirectStream?: boolean;
       enableTranscoding?: boolean;
@@ -398,7 +747,9 @@ export class JellyfinApiClient {
       payload.AudioStreamIndex = options.audioStreamIndex;
     }
 
-    if (typeof options.subtitleStreamIndex === 'number') {
+    if (options.subtitleStreamIndex === null) {
+      payload.SubtitleStreamIndex = -1;
+    } else if (typeof options.subtitleStreamIndex === 'number') {
       payload.SubtitleStreamIndex = options.subtitleStreamIndex;
     }
 

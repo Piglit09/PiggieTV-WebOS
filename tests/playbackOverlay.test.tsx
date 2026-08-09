@@ -80,7 +80,7 @@ function PlaybackHarness({ autoPlayNext = true }: { autoPlayNext?: boolean }) {
   );
 }
 
-function AudioPlaybackHarness() {
+function AudioPlaybackHarness({ withQueue = false }: { withQueue?: boolean }) {
   const { state, dispatch } = useApp();
 
   useEffect(() => {
@@ -107,11 +107,28 @@ function AudioPlaybackHarness() {
         userId: 'user-audio-overlay',
         title: 'Audio Feature',
         artist: 'Overlay Artist',
-        album: 'Overlay Album'
+        album: 'Overlay Album',
+        queue: withQueue ? {
+          items: [
+            {
+              itemId: 'audio-track-overlay',
+              title: 'Audio Feature',
+              artist: 'Overlay Artist',
+              album: 'Overlay Album'
+            },
+            {
+              itemId: 'audio-track-next',
+              title: 'Next Audio Feature',
+              artist: 'Next Artist',
+              album: 'Next Album'
+            }
+          ],
+          index: 0
+        } : undefined
       }
     });
     dispatch({ type: 'set_route', route: { screen: 'playback', itemId: 'audio-track-overlay', sectionId: null } });
-  }, [dispatch]);
+  }, [dispatch, withQueue]);
 
   const playbackReady = state.route.screen === 'playback' && state.playbackIntent?.kind === 'audio' && state.userSession;
   return (
@@ -439,5 +456,41 @@ describe('Phase 2 playback overlay', () => {
     );
     expect(document.querySelector('.ptv-playback-mini')).toBeNull();
     expect(document.querySelector('.ptv-playback__overlay')).toBeTruthy();
+  });
+
+  it('waits for natural audio completion and advances once to the next queued track', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+
+    render(
+      <AppProvider>
+        <AudioPlaybackHarness withQueue />
+      </AppProvider>
+    );
+    await flushPlaybackWork();
+
+    const video = document.querySelector('video') as HTMLVideoElement;
+    Object.defineProperties(video, {
+      readyState: { configurable: true, value: 2 },
+      duration: { configurable: true, value: 180 },
+      currentTime: { configurable: true, writable: true, value: 180 },
+      ended: { configurable: true, value: true }
+    });
+    await act(async () => {
+      fireEvent.loadedData(video);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      fireEvent.ended(video);
+      fireEvent.ended(video);
+      for (let index = 0; index < 20; index += 1) await Promise.resolve();
+    });
+
+    expect(api.reportStopped).toHaveBeenCalledTimes(1);
+    expect(api.getNextUpForSeries).not.toHaveBeenCalled();
+    expect(screen.getByTestId('audio-playback-state').textContent).toContain('playback:audio-track-next|');
+    expect(screen.getByRole('heading', { name: 'Next Audio Feature' })).toBeTruthy();
   });
 });

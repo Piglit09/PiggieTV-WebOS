@@ -22,6 +22,7 @@ export interface RememberedBrowseLocation {
 }
 
 export interface CachedSearchSnapshot {
+  filter?: string;
   query: string;
   items: PtvItem[];
 }
@@ -282,6 +283,7 @@ export function writeSearchSnapshot(
   const entry = getEntry(sessionKey, true);
   if (!entry) return false;
   entry.search = {
+    filter: snapshot.filter,
     query: snapshot.query,
     items: cloneValue(snapshot.items.slice(0, 16))
   };

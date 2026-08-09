@@ -13,6 +13,9 @@ const KNOWN_TYPES: readonly string[] = [
   'MusicVideo',
   'Book',
   'Playlist',
+  'Genre',
+  'MusicGenre',
+  'Studio',
   'Game',
   'PhotoAlbum',
   'Folder',
@@ -90,42 +93,56 @@ function normalizeMediaStreams(raw: unknown): PtvMediaStreamInfo[] | undefined {
     const source = item as Record<string, unknown>;
     const id = toOptionalString(source.Id) ?? toOptionalString(source.StreamId);
     const index = toOptionalNumber(source.Index);
+    const rawType = toOptionalString(source.Type)?.toLowerCase();
+    const type = rawType === 'video'
+      ? 'Video'
+      : rawType === 'audio'
+        ? 'Audio'
+        : rawType === 'subtitle'
+          ? 'Subtitle'
+          : undefined;
     const codec = toOptionalString(source.Codec);
     const container = toOptionalString(source.Container);
     const language = toOptionalString(source.Language);
     const title = toOptionalString(source.Title);
-    const channelCount = typeof source.ChannelLayout === 'string'
-      ? Number(source.ChannelLayout)
-      : typeof source.Channels === 'number'
-        ? source.Channels
-        : typeof source.ChannelCount === 'number'
-          ? source.ChannelCount
-          : undefined;
+    const displayTitle = toOptionalString(source.DisplayTitle);
+    const channelCount = toOptionalNumber(source.Channels) ?? toOptionalNumber(source.ChannelCount);
     const isDefault = source.IsDefault === true;
     const isForced = source.IsForced === true;
     const isExternal = source.IsExternal === true;
-    const isVideoStream = source.Type === 'Video';
-    const isAudioStream = source.Type === 'Audio';
+    const isVideoStream = type === 'Video';
+    const isAudioStream = type === 'Audio';
+    const isSubtitleStream = type === 'Subtitle';
 
     return {
       id,
       index,
+      type,
       container,
       codec,
       language,
       title,
+      displayTitle,
+      bitrate: toOptionalNumber(source.BitRate) ?? toOptionalNumber(source.Bitrate),
+      width: toOptionalNumber(source.Width),
+      height: toOptionalNumber(source.Height),
+      profile: toOptionalString(source.Profile),
+      videoRange: toOptionalString(source.VideoRange),
+      videoRangeType: toOptionalString(source.VideoRangeType),
+      channelLayout: toOptionalString(source.ChannelLayout),
       channelCount: Number.isFinite(channelCount as number) ? Number(channelCount) : undefined,
       isDefault,
       isForced,
       isExternal,
       isVideoStream,
-      isAudioStream
+      isAudioStream,
+      isSubtitleStream
     };
   });
   const resolvedStreams = streams
     .filter((stream): stream is PtvMediaStreamInfo => Boolean(stream))
     .filter((stream): stream is PtvMediaStreamInfo => (
-      Boolean(stream.id) || Boolean(stream.index) || Boolean(stream.codec)
+      Boolean(stream.id) || typeof stream.index === 'number' || Boolean(stream.codec)
     ));
 
   return resolvedStreams.length ? resolvedStreams : undefined;
@@ -140,6 +157,8 @@ function normalizeMediaSources(raw: unknown): PtvMediaSource[] | undefined {
       id: toOptionalString(source.Id),
       container: toOptionalString(source.Container),
       codec: toOptionalString(source.Codec),
+      videoCodec: toOptionalString(source.VideoCodec),
+      audioCodec: toOptionalString(source.AudioCodec),
       isRemote: source.IsRemote === true,
       bitrate: toOptionalNumber(source.Bitrate),
       width: toOptionalNumber(source.Width),
@@ -165,6 +184,7 @@ function safeDisplayName(nameSource: unknown, fallback = 'Untitled'): string {
 function coerceType(raw: unknown): PtvItemKind {
   const type = toOptionalString(raw)?.toLowerCase();
   if (!type) return 'Unknown';
+  if (type === 'boxset') return 'Collection';
   const exact = KNOWN_TYPES.find(candidate => candidate.toLowerCase() === type);
   return exact ? (exact as PtvItemKind) : 'Unknown';
 }
@@ -201,6 +221,7 @@ export function mapLibraryList(raw: unknown): PtvLibrary[] {
 
 export interface MapPtvItemOptions {
   includeUnsupportedTypes?: boolean;
+  excludeEmptyVideoContainers?: boolean;
 }
 
 export function mapPtvItem(raw: unknown): PtvItem {
@@ -238,6 +259,8 @@ export function mapPtvItem(raw: unknown): PtvItem {
     parentId: toOptionalString(value.ParentId),
     indexNumber: toOptionalNumber(value.IndexNumber),
     parentIndexNumber: toOptionalNumber(value.ParentIndexNumber),
+    childCount: toOptionalNumber(value.ChildCount),
+    recursiveItemCount: toOptionalNumber(value.RecursiveItemCount),
     productionYear: toOptionalNumber(value.ProductionYear),
     premiereDate: toOptionalString(value.PremiereDate),
     endDate: toOptionalString(value.EndDate),
@@ -274,6 +297,11 @@ export function mapPtvItems(raw: unknown, options: MapPtvItemOptions = {}): PtvI
     try {
       const mapped = mapPtvItem(item);
       if (!options.includeUnsupportedTypes && mapped.type === 'Unknown') continue;
+      if (
+        options.excludeEmptyVideoContainers &&
+        (mapped.type === 'Series' || mapped.type === 'Season') &&
+        mapped.recursiveItemCount === 0
+      ) continue;
       result.push(mapped);
     } catch {
       // skip malformed entry and continue with the remaining list items
@@ -329,6 +357,9 @@ export function isPhotoOrUnsupportedItem(item: PtvItem): boolean {
   return item.type === 'PhotoAlbum'
     || item.type === 'Unknown'
     || item.type === 'Person'
+    || item.type === 'Genre'
+    || item.type === 'MusicGenre'
+    || item.type === 'Studio'
     || item.type === 'Playlist'
     || item.type === 'Game'
     || item.type === 'Channel';

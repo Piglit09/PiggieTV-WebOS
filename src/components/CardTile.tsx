@@ -13,6 +13,10 @@ function placeholderLabel(item: PtvItem) {
   if (item.type === 'MusicAlbum') return 'ALB';
   if (item.type === 'MusicArtist') return 'ART';
   if (item.type === 'MusicVideo') return 'MV';
+  if (item.type === 'Genre') return 'GEN';
+  if (item.type === 'MusicGenre') return 'MGEN';
+  if (item.type === 'Studio') return 'STD';
+  if (item.type === 'Collection') return 'COL';
   if (item.type === 'Book') return 'READ';
   return 'PTV';
 }

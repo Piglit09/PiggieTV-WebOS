@@ -1,6 +1,7 @@
 import { requestJson } from '../http/http';
 import type { PtvCapability } from '../../types/ptv';
 import type { RequestTracker } from '../../core/requestTracker';
+import { PTV_APPLICATION_NAME, PTV_APPLICATION_VERSION } from '../../config/app';
 
 export interface PtvPluginStatus {
   ok: boolean;
@@ -32,9 +33,9 @@ export class PtvPluginApiClient {
     this.accessToken = accessToken;
     this.requestTracker = requestTracker;
     this.headers = {
-      'X-Application-Name': 'PiggieTV',
-      'X-Application-Version': '0.1.0',
-      'User-Agent': 'PTV-webOS/0.1.0',
+      'X-Application-Name': PTV_APPLICATION_NAME,
+      'X-Application-Version': PTV_APPLICATION_VERSION,
+      'User-Agent': `PTV-webOS/${PTV_APPLICATION_VERSION}`,
       Accept: 'application/json'
     };
   }

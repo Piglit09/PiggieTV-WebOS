@@ -176,9 +176,19 @@ export class RequestTracker {
   }
 
   public getSlowestDuration() {
-    return this.completedRequests.reduce((maximum, entry) => (
-      Math.max(maximum, typeof entry.durationMs === 'number' ? entry.durationMs : 0)
-    ), 0);
+    let slowest = 0;
+    for (const entry of this.completedRequests) {
+      if (typeof entry.durationMs === 'number' && entry.durationMs > slowest) {
+        slowest = entry.durationMs;
+      }
+    }
+    for (const entry of this.activeRequests.values()) {
+      const inFlightMs = Date.now() - entry.startedAt;
+      if (inFlightMs > slowest) {
+        slowest = inFlightMs;
+      }
+    }
+    return slowest;
   }
 
   public getRecentErrors(limit = 15) {

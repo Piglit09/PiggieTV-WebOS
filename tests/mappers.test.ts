@@ -50,6 +50,119 @@ describe('Ptv item mapper', () => {
     expect(mapped.favorite).toBe(true);
   });
 
+  it('maps rich video, audio, and subtitle media source metadata', () => {
+    const mapped = mapPtvItem({
+      Id: 'movie-rich-media',
+      Name: 'Rich Media Movie',
+      Type: 'Movie',
+      MediaSources: [{
+        Id: 'source-4k',
+        Container: 'mkv',
+        VideoCodec: 'hevc',
+        AudioCodec: 'eac3',
+        Bitrate: 24_000_000,
+        Width: 3840,
+        Height: 2160,
+        DirectStreamUrl: '/Videos/movie-rich-media/stream',
+        TranscodingUrl: '/Videos/movie-rich-media/master.m3u8',
+        MediaStreams: [{
+          Id: 'video-0',
+          Type: 'Video',
+          Index: 0,
+          Codec: 'hevc',
+          BitRate: 18_000_000,
+          Width: 3840,
+          Height: 2160,
+          Profile: 'Main 10',
+          VideoRange: 'HDR10',
+          VideoRangeType: 'HDR10',
+          IsDefault: true
+        }, {
+          Id: 'audio-2',
+          Type: 'Audio',
+          Index: 2,
+          Codec: 'eac3',
+          Language: 'eng',
+          Title: 'English',
+          DisplayTitle: 'English Dolby Digital+ 5.1',
+          ChannelLayout: '5.1',
+          Channels: 6,
+          IsDefault: true
+        }, {
+          Id: 'subtitle-5',
+          Type: 'Subtitle',
+          Index: 5,
+          Codec: 'subrip',
+          Language: 'eng',
+          Title: 'English Forced',
+          DisplayTitle: 'English Forced SRT',
+          IsForced: true,
+          IsExternal: true
+        }]
+      }]
+    });
+
+    expect(mapped.mediaSources).toHaveLength(1);
+    expect(mapped.mediaSources?.[0]).toMatchObject({
+      id: 'source-4k',
+      container: 'mkv',
+      videoCodec: 'hevc',
+      audioCodec: 'eac3',
+      bitrate: 24_000_000,
+      width: 3840,
+      height: 2160,
+      directStreamUrl: '/Videos/movie-rich-media/stream',
+      transcodingUrl: '/Videos/movie-rich-media/master.m3u8'
+    });
+    expect(mapped.mediaSources?.[0]?.streams).toEqual([
+      expect.objectContaining({
+        id: 'video-0',
+        index: 0,
+        type: 'Video',
+        codec: 'hevc',
+        bitrate: 18_000_000,
+        width: 3840,
+        height: 2160,
+        profile: 'Main 10',
+        videoRange: 'HDR10',
+        videoRangeType: 'HDR10',
+        isDefault: true,
+        isVideoStream: true,
+        isAudioStream: false,
+        isSubtitleStream: false
+      }),
+      expect.objectContaining({
+        id: 'audio-2',
+        index: 2,
+        type: 'Audio',
+        codec: 'eac3',
+        language: 'eng',
+        title: 'English',
+        displayTitle: 'English Dolby Digital+ 5.1',
+        channelLayout: '5.1',
+        channelCount: 6,
+        isDefault: true,
+        isVideoStream: false,
+        isAudioStream: true,
+        isSubtitleStream: false
+      }),
+      expect.objectContaining({
+        id: 'subtitle-5',
+        index: 5,
+        type: 'Subtitle',
+        codec: 'subrip',
+        language: 'eng',
+        title: 'English Forced',
+        displayTitle: 'English Forced SRT',
+        isForced: true,
+        isExternal: true,
+        isVideoStream: false,
+        isAudioStream: false,
+        isSubtitleStream: true
+      })
+    ]);
+  });
+
   it('falls back image tag mapping to PrimaryImageTag', () => {
     const mapped = mapPtvItem({
       Id: 'movie-2',
@@ -74,6 +187,30 @@ describe('Ptv item mapper', () => {
     expect(mapPtvItems(response, { includeUnsupportedTypes: true }).map(item => item.id)).toEqual(['x-1', 'x-2', 'x-3']);
   });
 
+  it('maps container counts and can exclude only explicitly empty shows and seasons', () => {
+    const response = {
+      Items: [
+        { Id: 'empty-series', Name: 'Empty Series', Type: 'Series', ChildCount: 2, RecursiveItemCount: 0 },
+        { Id: 'ready-series', Name: 'Ready Series', Type: 'Series', ChildCount: 2, RecursiveItemCount: 12 },
+        { Id: 'unknown-count-series', Name: 'Legacy Series', Type: 'Series' },
+        { Id: 'empty-season', Name: 'Empty Season', Type: 'Season', RecursiveItemCount: 0 },
+        { Id: 'episode-1', Name: 'Pilot', Type: 'Episode' }
+      ]
+    };
+
+    const allItems = mapPtvItems(response);
+    expect(allItems[0]).toMatchObject({
+      id: 'empty-series',
+      childCount: 2,
+      recursiveItemCount: 0
+    });
+    expect(mapPtvItems(response, { excludeEmptyVideoContainers: true }).map(item => item.id)).toEqual([
+      'ready-series',
+      'unknown-count-series',
+      'episode-1'
+    ]);
+  });
+
   it('handles missing identity safely without leaking object text', () => {
     const mapped = mapPtvItem({
       Id: 'no-name',
@@ -91,6 +228,14 @@ describe('Ptv item mapper', () => {
     expect(mapItemTypeFromServer('Series')).toBe('Series');
     expect(mapItemTypeFromServer('series')).toBe('Series');
     expect(mapItemTypeFromServer('UnknownStuff')).toBe('Unknown');
+  });
+
+  it('preserves taxonomy result types and maps Jellyfin BoxSet collections', () => {
+    expect(mapPtvItem({ Id: 'genre-1', Type: 'Genre', Name: 'Drama' }).type).toBe('Genre');
+    expect(mapPtvItem({ Id: 'music-genre-1', Type: 'MusicGenre', Name: 'Dream Pop' }).type).toBe('MusicGenre');
+    expect(mapPtvItem({ Id: 'studio-1', Type: 'Studio', Name: 'Pixar' }).type).toBe('Studio');
+    expect(mapPtvItem({ Id: 'collection-1', Type: 'BoxSet', Name: 'Favorites' }).type).toBe('Collection');
+    expect(canNavigateToDetails(mapPtvItem({ Id: 'genre-1', Type: 'Genre', Name: 'Drama' }))).toBe(false);
   });
 
   it('flags requested item categories correctly', () => {
