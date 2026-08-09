@@ -9,6 +9,7 @@ import {
 } from '../../src/state/homeCache';
 import { clearMediaCache } from '../../src/state/mediaCache';
 import { defaultStorageState, STORAGE_KEY } from '../../src/storage/sessionStore';
+import { DiagnosticsService } from '../../src/core/diagnostics';
 
 type Deferred<T> = {
   promise: Promise<T>;
@@ -599,8 +600,9 @@ describe('integration: startup and canonical session restore', () => {
     expect(mockSetAccessToken).toHaveBeenLastCalledWith(undefined);
   });
 
-  it('retains a saved session after a transient restore failure and retries Users/Me', async () => {
+  it('uses one StrictMode restore flight and one new generation for an explicit retry', async () => {
     seedSession();
+    const recordRestore = vi.spyOn(DiagnosticsService.prototype, 'recordSessionRestore');
     mockValidateSession
       .mockRejectedValueOnce({
         kind: 'network-error',
@@ -608,16 +610,31 @@ describe('integration: startup and canonical session restore', () => {
         recoverable: true
       })
       .mockResolvedValueOnce({ Id: 'user-1', Name: 'Stored User' });
-    render(<App />);
+    render(<React.StrictMode><App /></React.StrictMode>);
 
     const retry = await screen.findByRole('button', { name: /retry/i });
     const afterFailure = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as { session?: unknown };
     expect(afterFailure.session).not.toBeNull();
+    expect(mockValidateServer).toHaveBeenCalledTimes(1);
+    expect(mockValidateSession).toHaveBeenCalledTimes(1);
+    expect(new Set(recordRestore.mock.calls.map(([event]) => (event as { attemptId?: string }).attemptId))).toEqual(
+      new Set(['restore-1'])
+    );
 
     fireEvent.click(retry);
     await screen.findByRole('heading', { name: 'PiggieTV' });
 
+    expect(mockValidateServer).toHaveBeenCalledTimes(2);
     expect(mockValidateSession).toHaveBeenCalledTimes(2);
+    expect(new Set(recordRestore.mock.calls.map(([event]) => (event as { attemptId?: string }).attemptId))).toEqual(
+      new Set(['restore-1', 'restore-2'])
+    );
+    expect(recordRestore.mock.calls.filter(([event]) => (
+      event as { attemptId?: string; stage?: string }
+    ).attemptId === 'restore-1' && (event as { stage?: string }).stage === 'USERS_ME_FAILED')).toHaveLength(1);
+    expect(recordRestore.mock.calls.filter(([event]) => (
+      event as { attemptId?: string; stage?: string }
+    ).attemptId === 'restore-2' && (event as { stage?: string }).stage === 'COMPLETE')).toHaveLength(1);
     const afterRetry = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as { session?: unknown };
     expect(afterRetry.session).not.toBeNull();
   });
@@ -955,6 +972,107 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
     expect(screen.getByText('1 / 2')).toBeTruthy();
   });
 
+  it('orders Seasons and Episodes before recommendations and preserves vertical remote navigation', async () => {
+    seedSession();
+    mockGetRecentlyAdded.mockImplementation((_userId: string, itemType: string) => Promise.resolve({
+      Items: itemType === 'Series'
+        ? [{ Id: 'series-scroll', Name: 'Scrollable Series', Type: 'Series' }]
+        : []
+    }));
+    mockGetItem.mockResolvedValue({
+      Id: 'series-scroll',
+      Name: 'Scrollable Series',
+      Type: 'Series',
+      Overview: 'A series with enough detail rows to require vertical navigation.'
+    });
+    mockGetSimilarItems.mockResolvedValue({
+      Items: [{
+        Id: 'related-series',
+        Name: 'Related Series',
+        Type: 'Series',
+        ProductionYear: 1994
+      }]
+    });
+    mockGetSeasons.mockResolvedValue({
+      Items: [{ Id: 'season-1', Name: 'Season 1', Type: 'Season', RecursiveItemCount: 1 }]
+    });
+    mockGetEpisodes.mockResolvedValue({
+      Items: [{
+        Id: 'episode-1',
+        Name: 'Pilot',
+        Type: 'Episode',
+        SeriesName: 'Scrollable Series',
+        ParentIndexNumber: 1,
+        IndexNumber: 1,
+        RunTimeTicks: 2_700_000_000
+      }]
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Scrollable Series' }));
+    const related = await screen.findByRole('button', { name: 'Related Series, Series, 1994' });
+    const season = await screen.findByRole('button', { name: 'Season 1' });
+    const episode = await screen.findByRole('button', { name: /^Pilot,/ });
+    const viewport = document.querySelector('.ptv-details__content') as HTMLDivElement;
+    expect(viewport).toBeTruthy();
+    expect(within(viewport).getAllByRole('heading', { level: 3 }).map(heading => heading.textContent)).toEqual([
+      'Seasons',
+      'Episodes',
+      'More Like This'
+    ]);
+    expect(season.compareDocumentPosition(episode) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(episode.compareDocumentPosition(related) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    const rect = (top: number, bottom: number, left = 100, right = 500) => ({
+      x: left,
+      y: top,
+      top,
+      bottom,
+      left,
+      right,
+      width: right - left,
+      height: bottom - top,
+      toJSON: () => ({})
+    } as DOMRect);
+    Object.defineProperties(viewport, {
+      clientHeight: { configurable: true, value: 700 },
+      scrollHeight: { configurable: true, value: 1_400 }
+    });
+    viewport.scrollTop = 0;
+    vi.spyOn(viewport, 'getBoundingClientRect').mockImplementation(() => rect(100, 800, 0, 1_200));
+    vi.spyOn(season, 'getBoundingClientRect').mockImplementation(() => (
+      rect(250 - viewport.scrollTop, 306 - viewport.scrollTop)
+    ));
+    vi.spyOn(episode, 'getBoundingClientRect').mockImplementation(() => (
+      rect(420 - viewport.scrollTop, 666 - viewport.scrollTop)
+    ));
+    vi.spyOn(related, 'getBoundingClientRect').mockImplementation(() => (
+      rect(900 - viewport.scrollTop, 1_146 - viewport.scrollTop)
+    ));
+
+    fireEvent.focus(season);
+    fireEvent.keyDown(window, { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40, which: 40 });
+    await waitFor(() => expect(document.activeElement).toBe(episode));
+    const scrollAtEpisode = viewport.scrollTop;
+
+    fireEvent.keyDown(window, { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40, which: 40 });
+
+    await waitFor(() => expect(document.activeElement).toBe(related));
+    const scrollAtRelated = viewport.scrollTop;
+    expect(scrollAtRelated).toBeGreaterThan(scrollAtEpisode);
+    expect(related.getBoundingClientRect().bottom).toBeLessThanOrEqual(704);
+
+    fireEvent.keyDown(window, { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38, which: 38 });
+    await waitFor(() => expect(document.activeElement).toBe(episode));
+    const scrollAfterEpisodeReturn = viewport.scrollTop;
+    expect(scrollAfterEpisodeReturn).toBeLessThan(scrollAtRelated);
+
+    fireEvent.keyDown(window, { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38, which: 38 });
+    await waitFor(() => expect(document.activeElement).toBe(season));
+    expect(viewport.scrollTop).toBeLessThan(scrollAfterEpisodeReturn);
+    expect(season.getBoundingClientRect().top).toBeGreaterThanOrEqual(148);
+  });
+
   it('rechecks an empty episode response instead of trapping it in the media cache', async () => {
     seedSession();
     mockGetRecentlyAdded.mockImplementation((_userId: string, itemType: string) => Promise.resolve({
@@ -1058,6 +1176,44 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
 
     await screen.findByRole('heading', { name: 'PiggieTV' });
     expect(screen.queryByRole('button', { name: 'Late private item' })).toBeNull();
+  });
+
+  it('keeps Song details visible while audio starts in the mini player', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+    seedSession();
+    const track = {
+      Id: 'audio-visible-player',
+      Name: 'Visible Player Track',
+      Type: 'Audio',
+      Album: 'Regression Album',
+      AlbumArtist: 'Regression Artist',
+      Artists: ['Regression Artist'],
+      RunTimeTicks: 2_330_000_000,
+      ProductionYear: 2026
+    };
+    mockGetItems.mockResolvedValue({ Items: [track], TotalRecordCount: 1 });
+    mockGetItem.mockResolvedValue(track);
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Music' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Visible Player Track, 2026' }));
+    const details = await screen.findByRole('main', { name: 'Song details' });
+    fireEvent.click(within(details).getByRole('button', { name: /^play$/i }));
+
+    await waitFor(() => expect(mockGetPlaybackInfo).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('main', { name: 'Song details' })).toBeTruthy();
+    expect(document.querySelector('.ptv-playback-route--mini')).toBeTruthy();
+    expect(document.querySelector('.ptv-playback-mini')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Now Playing' }));
+    await waitFor(() => expect(document.querySelector('.ptv-playback__now-playing')).toBeTruthy());
+    expect(screen.queryByRole('main', { name: 'Song details' })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    await screen.findByRole('main', { name: 'Song details' });
+    expect(document.querySelector('.ptv-playback-mini')).toBeTruthy();
   });
 
   it('uses one persistent video pipeline and restores Details focus after playback Back', async () => {

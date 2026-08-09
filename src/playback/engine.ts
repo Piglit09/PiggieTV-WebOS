@@ -90,6 +90,8 @@ export interface PlaybackResolvedSource {
   requestedOutputContainer?: string | null;
   requestedOutputVideoCodec?: string | null;
   requestedOutputAudioCodec?: string | null;
+  audioStreamIndex?: number | null;
+  subtitleStreamIndex?: number | null;
 }
 
 export interface PlaybackResolveContext {
@@ -102,6 +104,10 @@ export interface PlaybackReport {
   itemId: string;
   playSessionId: string | null;
   mediaSourceId: string | null;
+  playMethod: 'DirectPlay' | 'DirectStream' | 'Transcode' | null;
+  canSeek: boolean;
+  audioStreamIndex: number | null;
+  subtitleStreamIndex: number | null;
   positionSeconds: number;
   positionTicks: number;
   isPaused: boolean;
@@ -1072,6 +1078,18 @@ export class PlaybackEngine {
     if (this.metrics === attempt.metrics) this.emitDiagnostics();
 
     const run = async () => {
+      if (kind === 'progress' && attempt.stoppedReportQueued) {
+        evidence.skipped.progress += 1;
+        evidence.last = {
+          kind,
+          status: 'skipped',
+          at: Date.now(),
+          reason: 'superseded-by-stopped-report'
+        };
+        if (this.metrics === attempt.metrics) this.emitDiagnostics();
+        return;
+      }
+
       evidence.attempted[kind] += 1;
       evidence.last = { kind, status: 'attempted', at: Date.now(), reason: null };
       if (this.metrics === attempt.metrics) this.emitDiagnostics();
@@ -1117,6 +1135,16 @@ export class PlaybackEngine {
       itemId: attempt.request.itemId,
       playSessionId: attempt.resolvedSource?.playSessionId ?? null,
       mediaSourceId: attempt.resolvedSource?.mediaSourceId ?? null,
+      playMethod: attempt.resolvedSource?.mode === 'direct-play'
+        ? 'DirectPlay'
+        : attempt.resolvedSource?.mode === 'direct-stream'
+          ? 'DirectStream'
+          : attempt.resolvedSource?.mode === 'transcode'
+            ? 'Transcode'
+            : null,
+      canSeek: this.canSeek(),
+      audioStreamIndex: attempt.resolvedSource?.audioStreamIndex ?? null,
+      subtitleStreamIndex: attempt.resolvedSource?.subtitleStreamIndex ?? null,
       positionSeconds,
       positionTicks: secondsToTicks(positionSeconds),
       isPaused: media?.paused ?? true,

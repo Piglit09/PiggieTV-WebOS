@@ -30,4 +30,10 @@ describe('Chrome 68 CSS compatibility', () => {
     expect(css).toMatch(/linear-gradient\(90deg,\s*var\(--ptv-purple\),\s*var\(--ptv-pink\)\)/);
     expect(css).not.toMatch(/focus-cyan|#61dcff|rgba\(97,\s*220,\s*255/i);
   });
+
+  it('keeps the mini player in normal flow so its auto-height host cannot collapse', () => {
+    const miniPlayerRule = css.match(/\.ptv-playback-mini\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(miniPlayerRule).toMatch(/position\s*:\s*relative\s*;/);
+    expect(miniPlayerRule).not.toMatch(/position\s*:\s*absolute\s*;/);
+  });
 });

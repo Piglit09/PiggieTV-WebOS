@@ -1,6 +1,6 @@
 {
   "id": "com.piggietv.webosnative",
-  "version": "0.1.1",
+  "version": "0.1.5",
   "vendor": "PiggieTV",
   "type": "web",
   "main": "index.html",

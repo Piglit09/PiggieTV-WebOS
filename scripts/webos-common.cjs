@@ -42,7 +42,8 @@ function requireSafeCliValue(value, label) {
 function requireDeviceAlias(args = process.argv.slice(2), env = process.env) {
   const alias = readDeviceAlias(args, env);
   if (!alias) {
-    throw new Error('Missing webOS device alias. Set PTV_WEBOS_TEST_DEVICE or pass --device <alias>.');
+    const defaultAlias = 'PiggieTV-LG';
+    return requireSafeCliValue(defaultAlias, 'Device alias');
   }
   return requireSafeCliValue(alias, 'Device alias');
 }

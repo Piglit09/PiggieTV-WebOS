@@ -1,5 +1,11 @@
 import { requestJson, type JellyfinAuthorizationContext, type RequestConfig } from '../http/http';
-import type { PtvAuthenticateResponse, PtvPlaybackInfoResponse, PtvServerIdentity, PtvSystemInfo } from './types';
+import type {
+  PtvAuthenticateResponse,
+  PtvPlaybackInfoResponse,
+  PtvPlaybackReport,
+  PtvServerIdentity,
+  PtvSystemInfo
+} from './types';
 import { normalizeServerUrl } from './normalizeUrl';
 import type { PtvCapability, PtvSearchCategoryKind } from '../../types/ptv';
 import { mapStatusToErrorKind, toPtvError } from '../../core/errors';
@@ -47,6 +53,17 @@ const SEARCH_CATEGORY_TIMEOUT_MS = 8_000;
 const SEARCH_RESPONSE_CACHE_TTL_MS = 60_000;
 const SEARCH_TIMEOUT_CACHE_TTL_MS = 15_000;
 const SEARCH_RESPONSE_CACHE_LIMIT = 64;
+const PLAYBACK_REPORT_TIMEOUT_MS = 8_000;
+
+type PlaybackReportPath =
+  | 'Sessions/Playing'
+  | 'Sessions/Playing/Progress'
+  | 'Sessions/Playing/Stopped';
+type PlaybackReportPayload = Omit<PtvPlaybackReport, 'ItemId'>;
+type PlaybackStoppedReportPayload = Pick<
+  PlaybackReportPayload,
+  'PlaySessionId' | 'PositionTicks' | 'MediaSourceId'
+>;
 
 type PtvItemsResponse = { Items: Array<Record<string, unknown>>; TotalRecordCount?: number };
 
@@ -240,8 +257,18 @@ export class JellyfinApiClient {
     }, this.getAuthorizationContext());
   }
 
-  private async sendReport<T>(path: string, body: unknown, timeoutMs?: number) {
-    return this.post<T>(path, body, timeoutMs);
+  private async sendReport<T>(path: PlaybackReportPath, body: unknown) {
+    return this.post<T>(
+      path,
+      body,
+      PLAYBACK_REPORT_TIMEOUT_MS,
+      undefined,
+      'playback',
+      {
+        retries: 0,
+        requestRoute: `POST ${path}`
+      }
+    );
   }
 
   public async validateServer(timeoutMs = 10000, requestConfig: RequestExtras = {}, signal?: AbortSignal): Promise<PtvSystemInfo> {
@@ -337,7 +364,11 @@ export class JellyfinApiClient {
   }
 
   public validateSession(_sessionUserId: string, timeoutMs = 10000, signal?: AbortSignal) {
-    return this.get<PtvTypedResponse>('Users/Me', undefined, timeoutMs, signal);
+    return this.get<PtvTypedResponse>('Users/Me', undefined, timeoutMs, signal, {
+      retries: 0,
+      requestCategory: 'authentication',
+      requestRoute: 'GET Users/Me'
+    });
   }
 
   public getUserProfile(sessionUserId: string, timeoutMs = 10000, signal?: AbortSignal) {
@@ -766,21 +797,21 @@ export class JellyfinApiClient {
     );
   }
 
-  public reportPlaying(itemId: string, payload: { PlaySessionId: string; PositionTicks: number }) {
+  public reportPlaying(itemId: string, payload: PlaybackReportPayload) {
     return this.sendReport<Record<string, unknown>>('Sessions/Playing', {
       ItemId: itemId,
       ...payload
     });
   }
 
-  public reportProgress(itemId: string, payload: { PlaySessionId: string; PositionTicks: number; IsPaused?: boolean }) {
+  public reportProgress(itemId: string, payload: PlaybackReportPayload) {
     return this.sendReport<Record<string, unknown>>('Sessions/Playing/Progress', {
       ItemId: itemId,
       ...payload
     });
   }
 
-  public reportStopped(itemId: string, payload: { PlaySessionId: string; PositionTicks: number }) {
+  public reportStopped(itemId: string, payload: PlaybackStoppedReportPayload) {
     return this.sendReport<Record<string, unknown>>('Sessions/Playing/Stopped', {
       ItemId: itemId,
       ...payload

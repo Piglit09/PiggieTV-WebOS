@@ -11,6 +11,7 @@ const authorization = {
 };
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -74,5 +75,57 @@ describe('shared Jellyfin HTTP transport', () => {
       signal: controller.signal
     }, authorization)).rejects.toMatchObject({ kind: 'cancelled-request' });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('accepts an empty 204 playback acknowledgement and records it as a successful response', async () => {
+    const tracker = new RequestTracker();
+    const fetchMock = vi.fn(async () => new Response(null, {
+      status: 204,
+      headers: { 'content-type': 'application/json' }
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(requestJson<Record<string, unknown>>('https://server.example.com/Sessions/Playing', {
+      method: 'POST',
+      body: { ItemId: 'item-1' },
+      retries: 0,
+      requestTracker: tracker,
+      requestCategory: 'playback',
+      requestRoute: 'POST Sessions/Playing'
+    }, authorization)).resolves.toEqual({});
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(tracker.getRecentRequests()).toEqual([
+      expect.objectContaining({
+        status: 204,
+        category: 'playback',
+        route: 'POST Sessions/Playing',
+        parseResult: 'empty'
+      })
+    ]);
+    expect(tracker.getTimeoutCount()).toBe(0);
+  });
+
+  it('does not amplify a bounded request when retries are disabled', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        reject(new DOMException('The operation was aborted', 'AbortError'));
+      }, { once: true });
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const request = requestJson('https://server.example.com/Sessions/Playing', {
+      method: 'POST',
+      body: { ItemId: 'item-1' },
+      timeoutMs: 50,
+      retries: 0
+    }, authorization);
+    const rejection = expect(request).rejects.toMatchObject({ kind: 'request-timeout' });
+
+    await vi.advanceTimersByTimeAsync(50);
+    await rejection;
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

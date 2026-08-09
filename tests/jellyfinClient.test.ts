@@ -85,6 +85,26 @@ describe('JellyfinApiClient server identity compatibility', () => {
     expect(requestJson).not.toHaveBeenCalled();
   });
 
+  it('validates the saved session once with an authentication-scoped Users/Me request', async () => {
+    requestJson.mockResolvedValue({ Id: 'user-1', Name: 'Piggie' });
+    const controller = new AbortController();
+
+    await createClient().validateSession('user-1', 8_000, controller.signal);
+
+    expect(requestJson).toHaveBeenCalledWith(
+      'https://piggietv.com/Users/Me',
+      expect.objectContaining({
+        method: 'GET',
+        timeoutMs: 8_000,
+        signal: controller.signal,
+        retries: 0,
+        requestCategory: 'authentication',
+        requestRoute: 'GET Users/Me'
+      }),
+      expect.any(Object)
+    );
+  });
+
   it('uses lean Home queries and disables unneeded result counts', async () => {
     requestJson.mockResolvedValue({ Items: [] });
     const client = createClient();
@@ -498,6 +518,66 @@ describe('JellyfinApiClient server identity compatibility', () => {
       }),
       expect.any(Object)
     );
+  });
+
+  it('sends complete playback state through one bounded, non-retrying report request', async () => {
+    requestJson.mockResolvedValue({});
+    const client = createClient();
+    const playbackState = {
+      PlaySessionId: 'play-session-1',
+      PositionTicks: 420_000_000,
+      MediaSourceId: 'media-source-1',
+      PlayMethod: 'Transcode' as const,
+      CanSeek: true,
+      AudioStreamIndex: 2,
+      SubtitleStreamIndex: 5,
+      IsPaused: false
+    };
+
+    await client.reportPlaying('private-item-id', playbackState);
+    await client.reportProgress('private-item-id', { ...playbackState, IsPaused: true });
+    await client.reportStopped('private-item-id', {
+      PlaySessionId: playbackState.PlaySessionId,
+      PositionTicks: playbackState.PositionTicks,
+      MediaSourceId: playbackState.MediaSourceId
+    });
+
+    expect(requestJson.mock.calls.map(call => new URL(String(call[0])).pathname)).toEqual([
+      '/Sessions/Playing',
+      '/Sessions/Playing/Progress',
+      '/Sessions/Playing/Stopped'
+    ]);
+    expect(requestJson.mock.calls[0]?.[1]?.body).toEqual({
+      ItemId: 'private-item-id',
+      ...playbackState
+    });
+    expect(requestJson.mock.calls[1]?.[1]?.body).toEqual({
+      ItemId: 'private-item-id',
+      ...playbackState,
+      IsPaused: true
+    });
+    expect(requestJson.mock.calls[2]?.[1]?.body).toEqual({
+      ItemId: 'private-item-id',
+      PlaySessionId: 'play-session-1',
+      PositionTicks: 420_000_000,
+      MediaSourceId: 'media-source-1'
+    });
+
+    requestJson.mock.calls.forEach((call, index) => {
+      expect(call[1]).toMatchObject({
+        method: 'POST',
+        timeoutMs: 8_000,
+        retries: 0,
+        requestCategory: 'playback',
+        requestRoute: [
+          'POST Sessions/Playing',
+          'POST Sessions/Playing/Progress',
+          'POST Sessions/Playing/Stopped'
+        ][index]
+      });
+      expect(String(call[1]?.requestRoute)).not.toContain('private-item-id');
+      expect(String(call[1]?.requestRoute)).not.toContain('play-session-1');
+    });
   });
 
   it('preserves audio index zero and distinguishes subtitle Off from Auto', async () => {

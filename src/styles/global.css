@@ -1385,6 +1385,21 @@ img.ptv-details__backdrop {
   min-height: 0;
 }
 
+.ptv-details--series .ptv-details__content {
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+
+.ptv-details--series .ptv-details__content::-webkit-scrollbar {
+  display: none;
+}
+
+.ptv-details--series .ptv-series-browser {
+  height: auto;
+}
+
 .ptv-season-line {
   min-height: 78px;
   display: grid;
@@ -2350,7 +2365,7 @@ img.ptv-details__backdrop {
    ============================================================ */
 
 .ptv-playback-mini {
-  position: absolute;
+  position: relative;
   right: 0;
   bottom: 0;
   left: 0;

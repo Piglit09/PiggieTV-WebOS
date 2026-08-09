@@ -68,6 +68,8 @@ const RELATED_RESULT_LIMIT = 16;
 const MUSIC_MIX_CANDIDATE_LIMIT = 64;
 const MUSIC_MIX_LIMIT = 24;
 const MILLIS_PER_DAY = 86_400_000;
+const DETAILS_FOCUS_TOP_GUTTER = 48;
+const DETAILS_FOCUS_BOTTOM_GUTTER = 96;
 const RELATED_FIELDS = [
   'ImageTags',
   'BackdropImageTags',
@@ -244,6 +246,25 @@ function selectedTrack(options: PlaybackTrackOption[], index: number | null) {
   return options.find(option => option.index === index) ?? null;
 }
 
+function revealFocusedDetailsControl(viewport: HTMLDivElement | null, target: HTMLElement) {
+  if (!viewport || !viewport.contains(target)) return;
+
+  const viewportBounds = viewport.getBoundingClientRect();
+  const targetBounds = target.getBoundingClientRect();
+  const maximumScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+  const safeTop = viewportBounds.top + DETAILS_FOCUS_TOP_GUTTER;
+  const safeBottom = viewportBounds.bottom - DETAILS_FOCUS_BOTTOM_GUTTER;
+  let nextScrollTop = viewport.scrollTop;
+
+  if (targetBounds.top < safeTop) {
+    nextScrollTop -= safeTop - targetBounds.top;
+  } else if (targetBounds.bottom > safeBottom) {
+    nextScrollTop += targetBounds.bottom - safeBottom;
+  }
+
+  viewport.scrollTop = Math.max(0, Math.min(maximumScrollTop, nextScrollTop));
+}
+
 export function DetailsScreen() {
   const { state, dispatch, services } = useApp();
   const itemId = state.route.itemId;
@@ -281,6 +302,7 @@ export function DetailsScreen() {
   const [mixError, setMixError] = useState<string | null>(null);
   const [selectedAudioStreamIndex, setSelectedAudioStreamIndex] = useState<number | null>(null);
   const [selectedSubtitleStreamIndex, setSelectedSubtitleStreamIndex] = useState<number | null>(null);
+  const detailsContentRef = useRef<HTMLDivElement>(null);
   const seasonSelectorRef = useRef<HTMLDivElement>(null);
   const pendingEpisodeFocus = useRef(false);
   const mixRequestRef = useRef<AbortController | null>(null);
@@ -307,6 +329,7 @@ export function DetailsScreen() {
     setPosterFailed(false);
     setBackdropFailed(false);
     setLogoFailed(false);
+    if (detailsContentRef.current) detailsContentRef.current.scrollTop = 0;
     if (seasonSelectorRef.current) seasonSelectorRef.current.scrollLeft = 0;
 
     void client.getItem(userSession.userId, itemId, DETAIL_FIELDS, controller.signal)
@@ -592,6 +615,16 @@ export function DetailsScreen() {
     return () => window.cancelAnimationFrame(frame);
   }, [item, relatedItems, services.focusManager, state.route]);
 
+  useEffect(() => {
+    if (item?.type !== 'Series') return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      const focused = document.activeElement;
+      if (!(focused instanceof HTMLElement)) return;
+      revealFocusedDetailsControl(detailsContentRef.current, focused);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [episodePage, episodes.length, item?.id, item?.type, relatedItems.length, seasons.length]);
+
   const startPlayback = (
     playable: PtvItem,
     restart = false,
@@ -649,7 +682,9 @@ export function DetailsScreen() {
         : undefined
     };
     dispatch({ type: 'set_playback_intent', playbackIntent: intent });
-    dispatch({ type: 'set_route', route: playbackRouteFromIntent(intent) });
+    if (intent.kind !== 'audio') {
+      dispatch({ type: 'set_route', route: playbackRouteFromIntent(intent) });
+    }
   };
   const startAlbumPlayback = () => {
     if (!item || item.type !== 'MusicAlbum' || !state.userSession || !state.serverSession) return;
@@ -840,7 +875,14 @@ export function DetailsScreen() {
         ) : <div className="ptv-details__backdrop ptv-details__backdrop--fallback" aria-hidden="true" />}
         <div className="ptv-details__scrim" aria-hidden="true" />
 
-        <div className={`ptv-details__content ${relatedActive ? 'is-related-active' : ''}`.trim()}>
+        <div
+          ref={detailsContentRef}
+          className={`ptv-details__content ${relatedActive ? 'is-related-active' : ''}`.trim()}
+          onFocusCapture={event => {
+            if (item?.type !== 'Series') return;
+            revealFocusedDetailsControl(detailsContentRef.current, event.target as HTMLElement);
+          }}
+        >
           <div className="ptv-details__summary">
             <div className="ptv-details__poster-wrap">
               {posterUrl && !posterFailed ? (
@@ -1109,70 +1151,6 @@ export function DetailsScreen() {
             </section>
           ) : null}
 
-          {item && !isMovie && canNavigateToDetails(item) ? (
-            <section className="ptv-series-browser" aria-labelledby="ptv-related-heading">
-              <div className="ptv-episode-line">
-                <div className="ptv-episode-line__heading">
-                  <h3 id="ptv-related-heading">More Like This</h3>
-                  {relatedItems.length ? <span className="ptv-muted">{relatedItems.length} related picks</span> : null}
-                </div>
-
-                {relatedLoading && relatedItems.length === 0 ? (
-                  <p className="ptv-muted">Loading related picks…</p>
-                ) : null}
-
-                {relatedError && relatedItems.length === 0 ? (
-                  <div className="ptv-episode-line__heading">
-                    <span className="ptv-error">{relatedError}</span>
-                    <FocusableButton
-                      focusId="details-related-retry"
-                      preferredRow="details-related"
-                      className="ptv-secondary-action"
-                      onClick={() => setRelatedRetryNonce(value => value + 1)}
-                    >
-                      Retry
-                    </FocusableButton>
-                  </div>
-                ) : null}
-
-                {!relatedLoading && !relatedError && relatedItems.length === 0 ? (
-                  <p className="ptv-muted">No related picks are available.</p>
-                ) : null}
-
-                {relatedItems.length ? (
-                  <div className="ptv-episode-viewport">
-                    <ul
-                      className="ptv-episode-grid"
-                      style={{ transform: `translate3d(${-relatedStart * GENERIC_RELATED_CARD_STEP}px, 0, 0)` }}
-                    >
-                      {relatedItems.map((related, index) => (
-                        <CardTile
-                          key={related.id}
-                          focusId={`details-related-${related.id}`}
-                          preferredRow="details-related"
-                          item={related}
-                          variant="episode"
-                          posterUrl={artworkUrlForItem(client, related, 'landscape')}
-                          context={mediaTypeLabel(related)}
-                          meta={related.productionYear
-                            ? String(related.productionYear)
-                            : related.runTimeTicks
-                              ? toHms(related.runTimeTicks)
-                              : null}
-                          progressPercent={itemProgress(related)}
-                          watched={Boolean(related.played)}
-                          onFocus={() => revealRelated(index)}
-                          onOpen={() => openRelated(related)}
-                          lazy
-                        />
-                      ))}
-                    </ul>
-                  </div>
-                ) : null}
-              </div>
-            </section>
-          ) : null}
-
           {item?.type === 'Series' ? (
             <div className="ptv-series-browser">
               <div className="ptv-season-line">
@@ -1269,6 +1247,71 @@ export function DetailsScreen() {
               </div>
             </div>
           ) : null}
+
+          {item && !isMovie && canNavigateToDetails(item) ? (
+            <section className="ptv-series-browser" aria-labelledby="ptv-related-heading">
+              <div className="ptv-episode-line">
+                <div className="ptv-episode-line__heading">
+                  <h3 id="ptv-related-heading">More Like This</h3>
+                  {relatedItems.length ? <span className="ptv-muted">{relatedItems.length} related picks</span> : null}
+                </div>
+
+                {relatedLoading && relatedItems.length === 0 ? (
+                  <p className="ptv-muted">Loading related picks…</p>
+                ) : null}
+
+                {relatedError && relatedItems.length === 0 ? (
+                  <div className="ptv-episode-line__heading">
+                    <span className="ptv-error">{relatedError}</span>
+                    <FocusableButton
+                      focusId="details-related-retry"
+                      preferredRow="details-related"
+                      className="ptv-secondary-action"
+                      onClick={() => setRelatedRetryNonce(value => value + 1)}
+                    >
+                      Retry
+                    </FocusableButton>
+                  </div>
+                ) : null}
+
+                {!relatedLoading && !relatedError && relatedItems.length === 0 ? (
+                  <p className="ptv-muted">No related picks are available.</p>
+                ) : null}
+
+                {relatedItems.length ? (
+                  <div className="ptv-episode-viewport">
+                    <ul
+                      className="ptv-episode-grid"
+                      style={{ transform: `translate3d(${-relatedStart * GENERIC_RELATED_CARD_STEP}px, 0, 0)` }}
+                    >
+                      {relatedItems.map((related, index) => (
+                        <CardTile
+                          key={related.id}
+                          focusId={`details-related-${related.id}`}
+                          preferredRow="details-related"
+                          item={related}
+                          variant="episode"
+                          posterUrl={artworkUrlForItem(client, related, 'landscape')}
+                          context={mediaTypeLabel(related)}
+                          meta={related.productionYear
+                            ? String(related.productionYear)
+                            : related.runTimeTicks
+                              ? toHms(related.runTimeTicks)
+                              : null}
+                          progressPercent={itemProgress(related)}
+                          watched={Boolean(related.played)}
+                          onFocus={() => revealRelated(index)}
+                          onOpen={() => openRelated(related)}
+                          lazy
+                        />
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+            </section>
+          ) : null}
+
           {item?.type === 'MusicAlbum' ? (
             <div className="ptv-series-browser">
               <div className="ptv-episode-line">

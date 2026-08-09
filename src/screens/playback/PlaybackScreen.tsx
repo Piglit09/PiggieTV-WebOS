@@ -338,6 +338,17 @@ export function PlaybackScreen() {
   const isMiniPlayer = isAudio && !isNowPlayingRoute;
   const isPlaybackRoute = state.route.screen === 'playback';
   const shouldRenderVideoControls = !isMiniPlayer;
+  const advanceAudioPlayback = useCallback((nextIntent: PtvPlaybackIntent) => {
+    if (state.route.screen === 'playback') {
+      dispatch({
+        type: 'advance_playback',
+        playbackIntent: nextIntent,
+        route: playbackRouteFromIntent(nextIntent, playbackRouteMode)
+      });
+      return;
+    }
+    dispatch({ type: 'set_playback_intent', playbackIntent: nextIntent });
+  }, [dispatch, playbackRouteMode, state.route.screen]);
   const rawQueueItems = intent?.queue?.items ?? null;
   const queueItemsWithTracks = useMemo(() => (
     (rawQueueItems ?? []).filter((track): track is PtvPlaybackQueueItem => Boolean(track))
@@ -566,7 +577,9 @@ export function PlaybackScreen() {
                 ? source.Container
                 : null,
             requestedOutputVideoCodec: transcodingRequested ? 'h264' : sourceVideoCodec,
-            requestedOutputAudioCodec: transcodingRequested ? 'aac' : sourceAudioCodec
+            requestedOutputAudioCodec: transcodingRequested ? 'aac' : sourceAudioCodec,
+            audioStreamIndex: selectedAudioTrackIndex,
+            subtitleStreamIndex: selectedSubtitleTrackIndex
           };
         },
         reportPlaying: async report => {
@@ -576,7 +589,13 @@ export function PlaybackScreen() {
           if (!report.playSessionId) return { status: 'skipped' as const, reason: 'attempt-runtime-unavailable' };
           await runtime.client.reportPlaying(report.itemId, {
             PlaySessionId: report.playSessionId,
-            PositionTicks: report.positionTicks
+            PositionTicks: report.positionTicks,
+            MediaSourceId: report.mediaSourceId ?? undefined,
+            PlayMethod: report.playMethod ?? undefined,
+            CanSeek: report.canSeek,
+            AudioStreamIndex: report.audioStreamIndex ?? undefined,
+            SubtitleStreamIndex: report.subtitleStreamIndex ?? undefined,
+            IsPaused: report.isPaused
           });
           return { status: 'sent' as const };
         },
@@ -588,6 +607,11 @@ export function PlaybackScreen() {
           await runtime.client.reportProgress(report.itemId, {
             PlaySessionId: report.playSessionId,
             PositionTicks: report.positionTicks,
+            MediaSourceId: report.mediaSourceId ?? undefined,
+            PlayMethod: report.playMethod ?? undefined,
+            CanSeek: report.canSeek,
+            AudioStreamIndex: report.audioStreamIndex ?? undefined,
+            SubtitleStreamIndex: report.subtitleStreamIndex ?? undefined,
             IsPaused: report.isPaused
           });
           return { status: 'sent' as const };
@@ -600,7 +624,8 @@ export function PlaybackScreen() {
             if (!report.playSessionId) return { status: 'skipped' as const, reason: 'attempt-runtime-unavailable' };
             await runtime.client.reportStopped(report.itemId, {
               PlaySessionId: report.playSessionId,
-              PositionTicks: report.positionTicks
+              PositionTicks: report.positionTicks,
+              MediaSourceId: report.mediaSourceId ?? undefined
             });
             return { status: 'sent' as const };
           } finally {
@@ -900,7 +925,6 @@ export function PlaybackScreen() {
       !engine ||
       !intent ||
       intent.kind !== 'audio' ||
-      state.route.screen !== 'playback' ||
       endedItemId !== intent.itemId ||
       !canGoNext ||
       autoAdvanceStartedForItemRef.current === intent.itemId
@@ -927,11 +951,7 @@ export function PlaybackScreen() {
         ) return;
 
         setAutoAdvancePending(false);
-        dispatch({
-          type: 'advance_playback',
-          playbackIntent: nextIntent,
-          route: playbackRouteFromIntent(nextIntent, playbackRouteMode)
-        });
+        advanceAudioPlayback(nextIntent);
       } catch (cause) {
         if (!active || controller.signal.aborted) return;
         services.diagnostics.logWarn('Audio queue auto-advance failed', {
@@ -954,14 +974,12 @@ export function PlaybackScreen() {
     };
   }, [
     activeQueueIndex,
+    advanceAudioPlayback,
     canGoNext,
-    dispatch,
     endedItemId,
     intent,
-    playbackRouteMode,
     queueItemsWithTracks,
-    services.diagnostics,
-    state.route.screen
+    services.diagnostics
   ]);
 
   const progressPercent = snapshot.duration && snapshot.duration > 0
@@ -996,12 +1014,8 @@ const playbackToggleLabel = playerState === 'ended' ? 'Ended' : (snapshot.paused
     if (targetIndex < 0 || targetIndex >= queueItemsWithTracks.length || targetIndex === activeQueueIndex) return;
     const nextIntent = playbackIntentAtQueueIndex(intent, queueItemsWithTracks, targetIndex);
     if (!nextIntent) return;
-    dispatch({
-      type: 'advance_playback',
-      playbackIntent: nextIntent,
-      route: playbackRouteFromIntent(nextIntent, playbackRouteMode)
-    });
-  }, [activeQueueIndex, dispatch, intent, queueItemsWithTracks, playbackRouteMode]);
+    advanceAudioPlayback(nextIntent);
+  }, [activeQueueIndex, advanceAudioPlayback, intent, queueItemsWithTracks]);
 
   const openNowPlaying = useCallback(() => {
     if (!intent) return;

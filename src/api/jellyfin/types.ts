@@ -94,13 +94,18 @@ export interface PtvItemFields {
   ServerId?: string;
 }
 
+export type PtvPlaybackPlayMethod = 'DirectPlay' | 'DirectStream' | 'Transcode';
+
 export interface PtvPlaybackReport {
   ItemId: string;
   PlaySessionId: string;
   PositionTicks: number;
   IsPaused?: boolean;
   MediaSourceId?: string;
-  MediaSourceId2?: string;
+  PlayMethod?: PtvPlaybackPlayMethod;
+  CanSeek?: boolean;
+  AudioStreamIndex?: number;
+  SubtitleStreamIndex?: number;
 }
 
 export interface PtvItemListResponse<T> {
