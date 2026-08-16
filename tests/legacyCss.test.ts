@@ -36,4 +36,26 @@ describe('Chrome 68 CSS compatibility', () => {
     expect(miniPlayerRule).toMatch(/position\s*:\s*relative\s*;/);
     expect(miniPlayerRule).not.toMatch(/position\s*:\s*absolute\s*;/);
   });
+
+  it('contains Shows titles without clipping the focused artwork glow', () => {
+    const cardRule = css.match(/\.ptv-browse--shows \.ptv-card--poster\s*\{([^}]*)\}/)?.[1] ?? '';
+    const buttonRule = css.match(/\.ptv-browse--shows \.ptv-card-btn\s*\{([^}]*)\}/)?.[1] ?? '';
+    const copyRule = css.match(/\.ptv-browse--shows \.ptv-card-copy\s*\{([^}]*)\}/)?.[1] ?? '';
+    const titleRule = css.match(/\.ptv-browse--shows \.ptv-card-title\s*\{([^}]*)\}/)?.[1] ?? '';
+
+    expect(cardRule).toMatch(/min-width\s*:\s*0\s*;/);
+    expect(buttonRule).toMatch(/min-width\s*:\s*0\s*;/);
+    expect(buttonRule).toMatch(/overflow\s*:\s*visible\s*;/);
+    expect(buttonRule).toMatch(/grid-template-columns\s*:\s*minmax\(0,\s*1fr\)\s*;/);
+    expect(copyRule).toMatch(/width\s*:\s*100%\s*;/);
+    expect(copyRule).toMatch(/max-width\s*:\s*100%\s*;/);
+    expect(copyRule).toMatch(/overflow\s*:\s*hidden\s*;/);
+    expect(copyRule).toMatch(/grid-template-columns\s*:\s*minmax\(0,\s*1fr\)\s*;/);
+    expect(titleRule).toMatch(/display\s*:\s*block\s*;/);
+    expect(titleRule).toMatch(/min-width\s*:\s*0\s*;/);
+    expect(titleRule).toMatch(/max-width\s*:\s*100%\s*;/);
+    expect(titleRule).toMatch(/overflow\s*:\s*hidden\s*;/);
+    expect(titleRule).toMatch(/text-overflow\s*:\s*ellipsis\s*;/);
+    expect(titleRule).toMatch(/white-space\s*:\s*nowrap\s*;/);
+  });
 });

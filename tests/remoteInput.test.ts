@@ -99,6 +99,30 @@ describe('remote input', () => {
     second.stop();
   });
 
+  it('returns pointer ownership to remote immediately for a directional event even when movement is filtered', () => {
+    const manager = new FocusManager();
+    const node = createNode('only', 0);
+    manager.register({ id: 'only', ref: node });
+    manager.recordPointerMovement(399, 200);
+    manager.recordPointerMovement(400, 200);
+    expect(manager.interactionMode).toBe('pointer');
+    const controller = new GlobalRemoteInputController({
+      focusManager: manager,
+      shouldHandle: () => false
+    });
+    controller.start();
+
+    window.dispatchEvent(keyboardEvent('ArrowDown', 40));
+
+    expect(manager.interactionMode).toBe('remote');
+    expect(manager.focusId).toBe('only');
+    expect(manager.recordPointerMovement(401, 200)).toBe(false);
+    expect(manager.interactionMode).toBe('remote');
+    expect(manager.recordPointerMovement(402, 200)).toBe(true);
+    expect(manager.interactionMode).toBe('pointer');
+    controller.stop();
+  });
+
   it('activates once and ignores repeated Enter events', () => {
     const manager = new FocusManager();
     const button = createNode('play', 0);
@@ -117,6 +141,28 @@ describe('remote input', () => {
 
     expect(click).toHaveBeenCalledTimes(1);
     expect(records.at(-1)?.reason).toBe('repeat-ignored');
+    controller.stop();
+  });
+
+  it('keeps remote ownership when Enter activates through a programmatic click', () => {
+    const manager = new FocusManager();
+    const button = createNode('play', 0);
+    button.addEventListener('click', () => manager.focus('play', {
+      reason: 'direct',
+      inputKey: 'click'
+    }));
+    manager.register({ id: 'play', ref: button });
+    const controller = new GlobalRemoteInputController({ focusManager: manager });
+    controller.start();
+    manager.recordPointerMovement(259, 140);
+    manager.recordPointerMovement(260, 140);
+    expect(manager.interactionMode).toBe('pointer');
+
+    window.dispatchEvent(keyboardEvent('Enter', 13));
+
+    expect(manager.interactionMode).toBe('remote');
+    expect(manager.focusId).toBe('play');
+    expect(document.activeElement).toBe(button);
     controller.stop();
   });
 

@@ -34,7 +34,8 @@ export default defineConfig({
     'import.meta.env.VITE_PTV_VERSION': JSON.stringify(appInfo.version),
     'import.meta.env.VITE_PTV_PACKAGE_ID': JSON.stringify(appInfo.id),
     'import.meta.env.VITE_PTV_BUILD_TS': JSON.stringify(buildTimestamp),
-    'import.meta.env.VITE_PTV_COMMIT': JSON.stringify(diagnosticBuildCommit)
+    'import.meta.env.VITE_PTV_COMMIT': JSON.stringify(diagnosticBuildCommit),
+    'import.meta.env.VITE_PTV_DIAGNOSTICS': JSON.stringify(process.env.PTV_DIAGNOSTICS === '1')
   },
   plugins: [
     react(),

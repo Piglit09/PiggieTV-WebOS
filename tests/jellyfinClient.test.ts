@@ -8,7 +8,7 @@ vi.mock('../src/api/http/http', () => ({
   requestJson
 }));
 
-import { JellyfinApiClient, resolvePlaybackStreamUrl } from '../src/api/jellyfin/client';
+import { JellyfinApiClient, resolvePlaybackStreamUrl, sanitizeItemFields } from '../src/api/jellyfin/client';
 
 function createClient() {
   return new JellyfinApiClient({
@@ -115,26 +115,39 @@ describe('JellyfinApiClient server identity compatibility', () => {
 
     expect(requestJson.mock.calls[0]?.[1]).toMatchObject({
       query: {
-        Fields: expect.stringContaining('BackdropImageTags'),
+        Fields: expect.stringContaining('Overview'),
         EnableUserData: true,
         EnableTotalRecordCount: false
       }
     });
     expect(requestJson.mock.calls[1]?.[1]).toMatchObject({
       query: {
-        Fields: expect.stringContaining('BackdropImageTags'),
+        Fields: expect.stringContaining('Overview'),
         EnableUserData: true,
         EnableTotalRecordCount: false
       }
     });
     expect(requestJson.mock.calls[2]?.[1]).toMatchObject({
       query: {
-        Fields: expect.stringContaining('BackdropImageTags'),
+        Fields: expect.stringContaining('Overview'),
         EnableUserData: true,
         EnableTotalRecordCount: false
       }
     });
     expect(requestJson.mock.calls[2]?.[1]?.query?.Fields).toEqual(expect.stringContaining('RecursiveItemCount'));
+  });
+
+  it('removes ordinary DTO properties that Jellyfin 10.11 rejects as ItemFields', async () => {
+    expect(sanitizeItemFields(
+      'ImageTags,UserData,SeriesName,SeriesId,SeasonId,IndexNumber,ParentIndexNumber,RunTimeTicks,Overview,ParentId,Genres'
+    )).toBe('Overview,ParentId,Genres');
+
+    requestJson.mockResolvedValue({ Items: [] });
+    await createClient().getItems('user-1', {
+      Fields: 'ImageTags,UserData,SeriesName,Overview,ParentId'
+    });
+
+    expect(requestJson.mock.calls[0]?.[1]?.query?.Fields).toBe('Overview,ParentId');
   });
 
   it('requests recursive episode counts for series discovery, search, and seasons', async () => {
@@ -276,9 +289,9 @@ describe('JellyfinApiClient server identity compatibility', () => {
     });
     expect(requestJson.mock.calls[1]?.[1]?.query).toMatchObject({
       IncludeItemTypes: 'MusicAlbum',
-      Fields: 'ImageTags,ProductionYear',
       Genres: 'Rock'
     });
+    expect(requestJson.mock.calls[1]?.[1]?.query).not.toHaveProperty('Fields');
     expect(requestJson.mock.calls[2]?.[1]).toMatchObject({
       query: { GenreIds: 'music/private' },
       requestRoute: 'GET Users/{user}/Items (search category by id)'
@@ -339,8 +352,7 @@ describe('JellyfinApiClient server identity compatibility', () => {
         EnableTotalRecordCount: false
       }
     });
-    expect(fallbackConfig.query.Fields).toEqual(expect.stringContaining('SeriesId'));
-    expect(fallbackConfig.query.Fields).toEqual(expect.stringContaining('SeasonId'));
+    expect(fallbackConfig.query.Fields).toBe('Overview,ParentId');
     expect(fallbackConfig.requestRoute).not.toContain('private-user');
     expect(fallbackConfig.requestRoute).not.toContain('series/private');
     expect(fallbackConfig.requestRoute).not.toContain('season/private');
@@ -384,6 +396,30 @@ describe('JellyfinApiClient server identity compatibility', () => {
     });
   });
 
+  it('loads a complete Series queue without a Season filter and preserves Series identity', async () => {
+    requestJson.mockResolvedValue({
+      Items: [
+        { Id: 'episode-1', Name: 'Pilot', Type: 'Episode', ParentId: 'season-1' },
+        { Id: 'episode-2', Name: 'Second', Type: 'Episode', ParentId: 'season-1', SeriesId: 'series-1' }
+      ]
+    });
+
+    const response = await createClient().getSeriesEpisodes('user-1', 'series-1');
+
+    expect(requestJson).toHaveBeenCalledTimes(1);
+    expect(requestJson.mock.calls[0]?.[1]?.query).toMatchObject({
+      UserId: 'user-1',
+      EnableUserData: true,
+      EnableTotalRecordCount: false,
+      Fields: 'Overview,ParentId'
+    });
+    expect(requestJson.mock.calls[0]?.[1]?.query).not.toHaveProperty('SeasonId');
+    expect(response.Items).toEqual([
+      expect.objectContaining({ Id: 'episode-1', SeriesId: 'series-1' }),
+      expect.objectContaining({ Id: 'episode-2', SeriesId: 'series-1' })
+    ]);
+  });
+
   it('uses a Series-scoped next-up query and an identifier-free diagnostic route', async () => {
     requestJson.mockResolvedValue({ Items: [] });
     const controller = new AbortController();
@@ -416,10 +452,7 @@ describe('JellyfinApiClient server identity compatibility', () => {
         EnableTotalRecordCount: false
       }
     });
-    expect(config.query?.Fields).toEqual(expect.stringContaining('SeriesName'));
-    expect(config.query?.Fields).toEqual(expect.stringContaining('SeasonName'));
-    expect(config.query?.Fields).toEqual(expect.stringContaining('IndexNumber'));
-    expect(config.query?.Fields).toEqual(expect.stringContaining('ParentIndexNumber'));
+    expect(config.query?.Fields).toBe('Overview');
     expect(config.requestRoute).not.toContain('private-user-id');
     expect(config.requestRoute).not.toContain('private-series-id');
   });
@@ -454,7 +487,7 @@ describe('JellyfinApiClient server identity compatibility', () => {
       query: {
         UserId: 'private-user-id',
         Limit: 64,
-        Fields: 'ImageTags,MediaSources,UserData',
+        Fields: 'MediaSources',
         EnableUserData: true,
         EnableTotalRecordCount: false
       }
@@ -493,7 +526,7 @@ describe('JellyfinApiClient server identity compatibility', () => {
       query: {
         UserId: 'private-user-id',
         Limit: 64,
-        Fields: 'Artists,Album,AlbumId,Genres,UserData',
+        Fields: 'Genres',
         EnableUserData: true,
         EnableTotalRecordCount: false
       }
@@ -578,6 +611,33 @@ describe('JellyfinApiClient server identity compatibility', () => {
       expect(String(call[1]?.requestRoute)).not.toContain('private-item-id');
       expect(String(call[1]?.requestRoute)).not.toContain('play-session-1');
     });
+  });
+
+  it('retries one failed playback-progress POST with the same complete payload', async () => {
+    requestJson
+      .mockRejectedValueOnce({
+        kind: 'server-error',
+        code: 500,
+        message: 'Unexpected end of request content',
+        recoverable: true
+      })
+      .mockResolvedValueOnce({});
+    const payload = {
+      PlaySessionId: 'play-session-retry',
+      PositionTicks: 123_000_000,
+      MediaSourceId: 'media-source-retry',
+      PlayMethod: 'DirectPlay' as const,
+      CanSeek: true,
+      IsPaused: false
+    };
+
+    await createClient().reportProgress('item-retry', payload);
+
+    expect(requestJson).toHaveBeenCalledTimes(2);
+    expect(requestJson.mock.calls[0]?.[1]?.body).toEqual({ ItemId: 'item-retry', ...payload });
+    expect(requestJson.mock.calls[1]?.[1]?.body).toEqual({ ItemId: 'item-retry', ...payload });
+    expect(requestJson.mock.calls[0]?.[1]?.retries).toBe(0);
+    expect(requestJson.mock.calls[1]?.[1]?.retries).toBe(0);
   });
 
   it('preserves audio index zero and distinguishes subtitle Off from Auto', async () => {

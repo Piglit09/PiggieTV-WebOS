@@ -18,8 +18,10 @@ export function FocusableButton({
   className,
   onClick,
   onFocus,
+  onMouseDown,
   onMouseEnter,
   onMouseLeave,
+  onMouseMove,
   disabled,
   ...props
 }: FocusableButtonProps) {
@@ -46,7 +48,15 @@ export function FocusableButton({
   }, [focusId, focusGroup, preferredRow, routeId, manager, disabled]);
 
   const clickHandler = (event: React.MouseEvent<HTMLButtonElement>) => {
-    manager.focus(focusId, { reason: 'pointer', inputKey: 'click', routeId });
+    if (event.detail > 0) {
+      manager.recordPointerMovement(event.clientX, event.clientY, event.timeStamp);
+      manager.claimPointerInteraction();
+    }
+    if (manager.interactionMode === 'pointer') {
+      manager.focusFromPointer(focusId, { inputKey: 'click', routeId });
+    } else {
+      manager.focus(focusId, { reason: 'direct', inputKey: 'click', routeId });
+    }
     onClick?.(event);
   };
 
@@ -60,17 +70,26 @@ export function FocusableButton({
       className={`ptv-focusable ${isActive ? 'is-focused' : ''} ${className ?? ''}`.trim()}
       onClick={clickHandler}
       onFocus={event => {
-        manager.focus(focusId, { reason: 'dom-focus', routeId });
+        manager.handleDomFocus(focusId, { reason: 'dom-focus', routeId });
         onFocus?.(event);
       }}
+      onMouseDown={event => {
+        manager.recordPointerMovement(event.clientX, event.clientY, event.timeStamp);
+        manager.claimPointerInteraction();
+        manager.focusFromPointer(focusId, { inputKey: 'pointer-down', routeId });
+        onMouseDown?.(event);
+      }}
       onMouseEnter={event => {
-        manager.setPointerFocusActive(true);
-        manager.focus(focusId, { reason: 'pointer', inputKey: 'pointer', routeId });
         onMouseEnter?.(event);
       }}
       onMouseLeave={event => {
-        manager.setPointerFocusActive(false);
         onMouseLeave?.(event);
+      }}
+      onMouseMove={event => {
+        if (manager.recordPointerMovement(event.clientX, event.clientY, event.timeStamp)) {
+          manager.focusFromPointer(focusId, { inputKey: 'pointer-move', routeId });
+        }
+        onMouseMove?.(event);
       }}
       tabIndex={-1}
     />

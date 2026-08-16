@@ -257,6 +257,44 @@ describe('Phase 2 playback overlay', () => {
     expect(load).toHaveBeenCalledTimes(1);
   });
 
+  it('re-resolves the same item from its current position after a bounded network media error', async () => {
+    const load = vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+
+    render(
+      <AppProvider>
+        <PlaybackHarness />
+      </AppProvider>
+    );
+    await flushPlaybackWork();
+
+    const video = document.querySelector('video') as HTMLVideoElement;
+    Object.defineProperties(video, {
+      readyState: { configurable: true, value: 2 },
+      duration: { configurable: true, value: 1_200 },
+      currentTime: { configurable: true, writable: true, value: 615 },
+      error: {
+        configurable: true,
+        value: { code: 2, message: 'MEDIA_ERR_NETWORK' }
+      }
+    });
+    fireEvent.loadedData(video);
+    await flushPlaybackWork();
+    expect(api.getPlaybackInfo).toHaveBeenCalledTimes(1);
+
+    fireEvent.error(video);
+    expect(screen.getByText('Connection interrupted. Retrying playback (1/2)…')).toBeTruthy();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(750);
+    });
+    await flushPlaybackWork();
+
+    expect(api.getPlaybackInfo).toHaveBeenCalledTimes(2);
+    expect(api.getPlaybackInfo.mock.calls[1]?.[1]).toBe('item-overlay');
+    expect(load).toHaveBeenCalledTimes(3);
+  });
+
   it('waits for the ended report, advances once to the next Series episode, and replaces the playback route', async () => {
     const load = vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
     const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);

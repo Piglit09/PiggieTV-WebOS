@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   MEDIA_CACHE_TTL_MS,
+  clearBrowseWindows,
   clearMediaCache,
   createMediaCacheSessionKey,
   readBrowsePage,
+  readBrowseWindow,
   readMediaMetadata,
   readRememberedBrowseLocation,
   readSearchSnapshot,
@@ -13,6 +15,7 @@ import {
   rememberBrowseLocation,
   synchronizeMediaCacheSession,
   writeBrowsePage,
+  writeBrowseWindow,
   writeMediaMetadata,
   writeSearchSnapshot,
   writeSelectedSeriesSeason,
@@ -166,6 +169,58 @@ describe('Phase 2 media cache', () => {
     expect(readRememberedBrowseLocation(key, 'movies')).toEqual({ filter: 'az', page: 1 });
     expect(readBrowsePage(key, 'movies', 'az', 1, MEDIA_CACHE_TTL_MS + 1)).toBeUndefined();
     expect(readRememberedBrowseLocation(key, 'movies')).toEqual({ filter: 'az', page: 1 });
+  });
+
+  it('stores isolated incremental browse windows and clears only the requested screen', () => {
+    const key = keyFor();
+    synchronizeMediaCacheSession(key);
+    const recentShows = [
+      item('show-1', { type: 'Series' }),
+      item('show-2', { type: 'Series' })
+    ];
+
+    expect(writeBrowseWindow(key, {
+      screen: 'shows',
+      filter: 'recent',
+      items: recentShows,
+      nextStartIndex: 24,
+      totalRecordCount: 1048,
+      hasMore: true,
+      focusedItemId: 'show-2'
+    }, 0)).toBe(true);
+    expect(writeBrowseWindow(key, {
+      screen: 'shows',
+      filter: 'az',
+      items: [item('show-a', { type: 'Series' })],
+      nextStartIndex: 24,
+      totalRecordCount: 1,
+      hasMore: false
+    }, 0)).toBe(true);
+    expect(writeBrowseWindow(key, {
+      screen: 'movies',
+      filter: 'recent',
+      items: [item('movie-1')],
+      nextStartIndex: 24,
+      totalRecordCount: 1,
+      hasMore: false
+    }, 0)).toBe(true);
+
+    const firstRead = readBrowseWindow(key, 'shows', 'recent', 1);
+    expect(firstRead).toMatchObject({
+      nextStartIndex: 24,
+      totalRecordCount: 1048,
+      hasMore: true,
+      focusedItemId: 'show-2',
+      items: [{ id: 'show-1' }, { id: 'show-2' }]
+    });
+    firstRead?.items.pop();
+    expect(readBrowseWindow(key, 'shows', 'recent', 1)?.items).toHaveLength(2);
+    expect(readBrowseWindow(key, 'shows', 'favorites', 1)).toBeUndefined();
+    expect(readBrowseWindow(key, 'shows', 'recent', MEDIA_CACHE_TTL_MS)).toBeUndefined();
+
+    expect(clearBrowseWindows(key, 'shows')).toBe(true);
+    expect(readBrowseWindow(key, 'shows', 'az', 1)).toBeUndefined();
+    expect(readBrowseWindow(key, 'movies', 'recent', 1)?.items[0]?.id).toBe('movie-1');
   });
 
   it('restores a bounded Search snapshot only within the active session', () => {

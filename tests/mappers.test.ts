@@ -50,6 +50,23 @@ describe('Ptv item mapper', () => {
     expect(mapped.favorite).toBe(true);
   });
 
+  it('uses the clean Jellyfin Name and keeps ProductionYear as a separate field', () => {
+    const mapped = mapPtvItem({
+      Id: 'series-clean-name',
+      Name: 'Clean Library Name',
+      OriginalTitle: 'Original Name [Provider 2026]',
+      SortName: 'Clean Library Name, The (2026)',
+      Path: '/media/shows/Clean.Library.Name.2026.Provider/series.mkv',
+      ProductionYear: 2026,
+      Type: 'Series'
+    });
+
+    expect(mapped.name).toBe('Clean Library Name');
+    expect(mapped.productionYear).toBe(2026);
+    expect(mapped.name).not.toContain('2026');
+    expect(mapped.name).not.toContain('/media/');
+  });
+
   it('maps rich video, audio, and subtitle media source metadata', () => {
     const mapped = mapPtvItem({
       Id: 'movie-rich-media',

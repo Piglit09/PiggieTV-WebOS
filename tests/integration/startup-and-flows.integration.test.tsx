@@ -32,6 +32,7 @@ const mockGetItem = vi.fn();
 const mockGetSimilarItems = vi.fn();
 const mockGetSeasons = vi.fn();
 const mockGetEpisodes = vi.fn();
+const mockGetSeriesEpisodes = vi.fn();
 const mockGetSearch = vi.fn();
 const mockGetSearchGenres = vi.fn();
 const mockGetSearchMusicGenres = vi.fn();
@@ -71,6 +72,7 @@ vi.mock('../../src/api/jellyfin/client', () => ({
       getSimilarItems: (...args: unknown[]) => mockGetSimilarItems(...args),
       getSeasons: (...args: unknown[]) => mockGetSeasons(...args),
       getEpisodes: (...args: unknown[]) => mockGetEpisodes(...args),
+      getSeriesEpisodes: (...args: unknown[]) => mockGetSeriesEpisodes(...args),
       getSearch: (...args: unknown[]) => mockGetSearch(...args),
       getSearchGenres: (...args: unknown[]) => mockGetSearchGenres(...args),
       getSearchMusicGenres: (...args: unknown[]) => mockGetSearchMusicGenres(...args),
@@ -168,6 +170,7 @@ beforeEach(() => {
     mockGetSimilarItems,
     mockGetSeasons,
     mockGetEpisodes,
+    mockGetSeriesEpisodes,
     mockGetSearch,
     mockGetSearchGenres,
     mockGetSearchMusicGenres,
@@ -213,6 +216,7 @@ beforeEach(() => {
   mockGetSimilarItems.mockResolvedValue({ Items: [] });
   mockGetSeasons.mockResolvedValue({ Items: [] });
   mockGetEpisodes.mockResolvedValue({ Items: [] });
+  mockGetSeriesEpisodes.mockResolvedValue({ Items: [] });
   mockGetSearch.mockResolvedValue({ Items: [] });
   mockGetSearchGenres.mockResolvedValue({ Items: [] });
   mockGetSearchMusicGenres.mockResolvedValue({ Items: [] });
@@ -860,6 +864,190 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
     }));
   });
 
+  it('shows same-season episodes before recommendations and opens the parent series from episode details', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+    seedSession();
+    mockGetResume.mockResolvedValue({
+      Items: [{
+        Id: 'episode-1',
+        Name: 'Romance Dawn',
+        Type: 'Episode',
+        SeriesId: 'series-1',
+        SeriesName: 'One Piece',
+        SeasonId: 'season-1',
+        SeasonName: 'Season 1',
+        ParentIndexNumber: 1,
+        IndexNumber: 1,
+        UserData: { PlaybackPositionTicks: 900_000_000 }
+      }]
+    });
+    mockGetItem.mockImplementation((_userId: string, itemId: string) => Promise.resolve(
+      itemId === 'series-1'
+        ? {
+            Id: 'series-1',
+            Name: 'One Piece',
+            Type: 'Series',
+            Overview: 'A pirate crew searches the world for a legendary treasure.',
+            ImageTags: { Logo: 'series-logo' },
+            BackdropImageTags: ['series-backdrop']
+          }
+        : {
+            Id: 'episode-1',
+            Name: 'Romance Dawn',
+            Type: 'Episode',
+            SeriesId: 'series-1',
+            SeriesName: 'One Piece',
+            SeasonId: 'season-1',
+            SeasonName: 'Season 1',
+            ParentId: 'season-1',
+            ParentIndexNumber: 1,
+            IndexNumber: 1,
+            ProductionYear: 2023,
+            RunTimeTicks: 38_400_000_000,
+            OfficialRating: 'TV-14',
+            CommunityRating: 8.3,
+            Genres: ['Action', 'Adventure', 'Comedy'],
+            Overview: 'Stranded on a sinking boat, carefree Luffy begins his journey in search of a pirate king’s lost treasure.',
+            ImageTags: { Primary: 'episode-frame' },
+            UserData: { PlaybackPositionTicks: 900_000_000 }
+          }
+    ));
+    mockGetEpisodes.mockResolvedValue({
+      Items: [
+        {
+          Id: 'episode-1',
+          Name: 'Romance Dawn',
+          Type: 'Episode',
+          SeriesId: 'series-1',
+          SeasonId: 'season-1',
+          ParentIndexNumber: 1,
+          IndexNumber: 1
+        },
+        {
+          Id: 'episode-2',
+          Name: 'The Man in the Straw Hat',
+          Type: 'Episode',
+          SeriesId: 'series-1',
+          SeriesName: 'One Piece',
+          SeasonId: 'season-1',
+          ParentIndexNumber: 1,
+          IndexNumber: 2,
+          RunTimeTicks: 30_000_000_000,
+          ImageTags: { Primary: 'episode-2-frame' }
+        },
+        {
+          Id: 'episode-3',
+          Name: 'Tell No Tales',
+          Type: 'Episode',
+          SeriesId: 'series-1',
+          SeriesName: 'One Piece',
+          SeasonId: 'season-1',
+          ParentIndexNumber: 1,
+          IndexNumber: 3,
+          RunTimeTicks: 30_000_000_000,
+          ImageTags: { Primary: 'episode-3-frame' }
+        },
+        ...Array.from({ length: 5 }, (_, index) => {
+          const episodeNumber = index + 4;
+          return {
+            Id: `episode-${episodeNumber}`,
+            Name: `Sibling Episode ${episodeNumber}`,
+            Type: 'Episode',
+            SeriesId: 'series-1',
+            SeriesName: 'One Piece',
+            SeasonId: 'season-1',
+            ParentIndexNumber: 1,
+            IndexNumber: episodeNumber,
+            RunTimeTicks: 30_000_000_000,
+            ImageTags: { Primary: `episode-${episodeNumber}-frame` }
+          };
+        })
+      ]
+    });
+    mockGetSimilarItems.mockImplementation((_userId: string, itemId: string) => Promise.resolve({
+      Items: itemId === 'episode-1'
+        ? [{ Id: 'related-series', Name: 'Naruto', Type: 'Series', ProductionYear: 2002 }]
+        : []
+    }));
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /^Romance Dawn, One Piece · S1 E1/ }));
+    await screen.findByRole('heading', { name: 'Romance Dawn' });
+    const sibling = await screen.findByRole('button', { name: /^The Man in the Straw Hat, S1 E2, 50m/ });
+    const related = await screen.findByRole('button', { name: 'Naruto, Series, 2002' });
+    const detailsViewport = document.querySelector('.ptv-details__content') as HTMLDivElement;
+
+    expect(mockGetItem.mock.calls.find(call => call[1] === 'episode-1')?.[2]).toEqual(expect.arrayContaining([
+      'SeriesId',
+      'SeasonId',
+      'ParentId'
+    ]));
+    expect(mockGetEpisodes).toHaveBeenCalledWith('user-1', 'series-1', 'season-1', expect.any(AbortSignal));
+    expect(within(detailsViewport).getAllByRole('heading', { level: 3 }).map(heading => heading.textContent)).toEqual([
+      'More Episodes from Season 1',
+      'More Like This'
+    ]);
+    expect(screen.queryByRole('button', { name: /^Romance Dawn, S1 E1/ })).toBeNull();
+    expect(sibling.compareDocumentPosition(related) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    const sixthSibling = screen.getByRole('button', { name: /^Sibling Episode 7, S1 E7, 50m/ });
+    fireEvent.focus(sixthSibling);
+    const sameSeasonTrack = within(detailsViewport)
+      .getByRole('region', { name: 'More Episodes from Season 1' })
+      .querySelector('.ptv-episode-grid') as HTMLUListElement;
+    await waitFor(() => expect(sameSeasonTrack.style.transform).toBe('translate3d(-322px, 0, 0)'));
+
+    const resume = screen.getByRole('button', { name: 'Resume' });
+    const rect = (top: number, bottom: number, left = 100, right = 500) => ({
+      x: left,
+      y: top,
+      top,
+      bottom,
+      left,
+      right,
+      width: right - left,
+      height: bottom - top,
+      toJSON: () => ({})
+    } as DOMRect);
+    Object.defineProperties(detailsViewport, {
+      clientHeight: { configurable: true, value: 700 },
+      scrollHeight: { configurable: true, value: 1_400 }
+    });
+    detailsViewport.scrollTop = 0;
+    vi.spyOn(detailsViewport, 'getBoundingClientRect').mockImplementation(() => rect(100, 800, 0, 1_500));
+    vi.spyOn(resume, 'getBoundingClientRect').mockImplementation(() => rect(400, 464, 510, 680));
+    vi.spyOn(sibling, 'getBoundingClientRect').mockImplementation(() => (
+      rect(720 - detailsViewport.scrollTop, 886 - detailsViewport.scrollTop, 52, 352)
+    ));
+    vi.spyOn(related, 'getBoundingClientRect').mockImplementation(() => (
+      rect(970 - detailsViewport.scrollTop, 1_136 - detailsViewport.scrollTop, 52, 352)
+    ));
+
+    fireEvent.focus(resume);
+    fireEvent.keyDown(window, { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40, which: 40 });
+    await waitFor(() => expect(document.activeElement).toBe(sibling));
+    const scrollAtSameSeason = detailsViewport.scrollTop;
+    expect(scrollAtSameSeason).toBeGreaterThan(0);
+    fireEvent.keyDown(window, { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40, which: 40 });
+    await waitFor(() => expect(document.activeElement).toBe(related));
+    expect(detailsViewport.scrollTop).toBeGreaterThan(scrollAtSameSeason);
+
+    const restart = screen.getByRole('button', { name: 'Restart' });
+    const seriesDetails = screen.getByRole('button', { name: 'Series Details' });
+    expect(restart.compareDocumentPosition(seriesDetails) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(seriesDetails);
+    await screen.findByRole('heading', { name: 'One Piece' });
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+
+    const restoredSeriesDetails = await screen.findByRole('button', { name: 'Series Details' });
+    await waitFor(() => expect(document.activeElement).toBe(restoredSeriesDetails));
+    fireEvent.click(await screen.findByRole('button', { name: /^The Man in the Straw Hat, S1 E2, 50m/ }));
+    await waitFor(() => expect(mockGetPlaybackInfo).toHaveBeenCalled());
+    expect(mockGetPlaybackInfo.mock.calls.at(-1)?.[1]).toBe('episode-2');
+  });
+
   it('loads only the selected Series season and starts playback with the episode ID', async () => {
     const load = vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
     vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
@@ -1071,6 +1259,97 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
     await waitFor(() => expect(document.activeElement).toBe(season));
     expect(viewport.scrollTop).toBeLessThan(scrollAfterEpisodeReturn);
     expect(season.getBoundingClientRect().top).toBeGreaterThanOrEqual(148);
+  });
+
+  it('keeps Series Play All and Shuffle All visible and advances a loaded queue without another Next Up lookup', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+    seedSession();
+    mockGetRecentlyAdded.mockImplementation((_userId: string, itemType: string) => Promise.resolve({
+      Items: itemType === 'Series'
+        ? [{ Id: 'series-queue', Name: 'Queue Show', Type: 'Series' }]
+        : []
+    }));
+    mockGetItem.mockResolvedValue({
+      Id: 'series-queue',
+      Name: 'Queue Show',
+      Type: 'Series',
+      Overview: 'A queue-ready Series.'
+    });
+    mockGetSeriesEpisodes.mockResolvedValue({
+      Items: [
+        {
+          Id: 'queue-episode-1',
+          Name: 'First',
+          Type: 'Episode',
+          SeriesId: 'series-queue',
+          SeriesName: 'Queue Show',
+          ParentIndexNumber: 1,
+          IndexNumber: 1
+        },
+        {
+          Id: 'queue-episode-2',
+          Name: 'Second',
+          Type: 'Episode',
+          SeriesId: 'series-queue',
+          SeriesName: 'Queue Show',
+          ParentIndexNumber: 1,
+          IndexNumber: 2
+        }
+      ]
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Queue Show' }));
+    const playAll = await screen.findByRole('button', { name: 'Play All' });
+    expect(screen.getByRole('button', { name: 'Shuffle All' })).toBeTruthy();
+    fireEvent.click(playAll);
+
+    await waitFor(() => expect(mockGetSeriesEpisodes).toHaveBeenCalledWith(
+      'user-1',
+      'series-queue',
+      expect.any(AbortSignal)
+    ));
+    await waitFor(() => expect(mockGetPlaybackInfo.mock.calls[0]?.[1]).toBe('queue-episode-1'));
+
+    const video = document.querySelector('video') as HTMLVideoElement;
+    Object.defineProperties(video, {
+      readyState: { configurable: true, value: 2 },
+      duration: { configurable: true, value: 270 },
+      currentTime: { configurable: true, writable: true, value: 270 },
+      ended: { configurable: true, value: true }
+    });
+    fireEvent.loadedData(video);
+    await waitFor(() => expect(mockReportPlaying).toHaveBeenCalledTimes(1));
+    fireEvent.ended(video);
+
+    await waitFor(() => expect(mockGetPlaybackInfo.mock.calls[1]?.[1]).toBe('queue-episode-2'));
+    expect(mockGetNextUpForSeries).not.toHaveBeenCalled();
+  });
+
+  it('shows a recoverable Series queue error without removing Play All or Shuffle All', async () => {
+    seedSession();
+    mockGetRecentlyAdded.mockImplementation((_userId: string, itemType: string) => Promise.resolve({
+      Items: itemType === 'Series'
+        ? [{ Id: 'series-error', Name: 'Retry Queue Show', Type: 'Series' }]
+        : []
+    }));
+    mockGetItem.mockResolvedValue({
+      Id: 'series-error',
+      Name: 'Retry Queue Show',
+      Type: 'Series'
+    });
+    mockGetSeriesEpisodes.mockRejectedValueOnce(new Error('Episode request failed'));
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry Queue Show' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Play All' }));
+
+    expect((await screen.findByRole('alert')).textContent).toContain('Episode request failed');
+    expect(screen.getByRole('button', { name: 'Play All' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Shuffle All' })).toBeTruthy();
+    expect(mockGetPlaybackInfo).not.toHaveBeenCalled();
   });
 
   it('rechecks an empty episode response instead of trapping it in the media cache', async () => {

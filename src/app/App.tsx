@@ -74,6 +74,8 @@ function diagnosticIdSuffix(value?: string | null) {
 function StartupCoordinator() {
   const { state, dispatch, services } = useApp();
   const previousMediaCacheSessionKey = useRef<string | null | undefined>(undefined);
+  const runtimeRouteRef = useRef(toRouteString(state.route));
+  runtimeRouteRef.current = toRouteString(state.route);
   const homeCacheSessionKey = createHomeCacheSessionKey(state.serverUrl, state.userSession);
   const mediaCacheSessionKey = createMediaCacheSessionKey(state.serverUrl, state.userSession);
 
@@ -100,7 +102,7 @@ function StartupCoordinator() {
 
   useEffect(() => {
     const routeId = toRouteString(state.route);
-    services.focusManager.setPointerFocusActive(false);
+    services.focusManager.claimRemoteInteraction();
     services.focusManager.setActiveRoute(routeId, {
       restore: true,
       fallbackFocusId: routeFallback(state.route),
@@ -110,9 +112,30 @@ function StartupCoordinator() {
     });
   }, [services.focusManager, state.route]);
 
-  useEffect(() => services.focusManager.subscribeTransitions(transition => {
-    services.diagnostics.recordFocusTransition({ ...transition });
-  }), [services.diagnostics, services.focusManager]);
+  useEffect(() => {
+    const unsubscribeTransitions = services.focusManager.subscribeTransitions(transition => {
+      services.diagnostics.recordFocusTransition({ ...transition });
+    });
+    if (!services.diagnostics.runtimeDiagnosticsActive) {
+      return unsubscribeTransitions;
+    }
+    const unsubscribeReconciliation = services.focusManager.subscribeReconciliationEvents(event => {
+      services.diagnostics.recordFocusReconciliationEvent({ ...event });
+    });
+    return () => {
+      unsubscribeTransitions();
+      unsubscribeReconciliation();
+    };
+  }, [services.diagnostics, services.focusManager]);
+
+  useEffect(() => services.diagnostics.startRuntimeDiagnostics(() => ({
+    currentRoute: runtimeRouteRef.current,
+    currentFocusId: services.focusManager.focusId,
+    focusInteraction: services.focusManager.interactionState,
+    lastFocusTransition: services.focusManager.lastTransition,
+    documentVisibility: typeof document === 'undefined' ? 'unknown' : document.visibilityState,
+    online: typeof navigator === 'undefined' ? null : navigator.onLine
+  })), [services.diagnostics, services.focusManager]);
 
   const previousRouteRef = useRef<string | null>(null);
   useEffect(() => {
@@ -148,16 +171,24 @@ function StartupCoordinator() {
     const listenerOwner = {};
     lifecycleListenerOwners.add(listenerOwner);
     const record = (type: string, details: Record<string, unknown> = {}) => {
-      services.diagnostics.recordLifecycleEvent({
+      const event = {
         type,
         at: Date.now(),
         visibilityState: document.visibilityState,
         ...details,
         listenerOwnerCount: lifecycleListenerOwners.size,
         duplicateListenerOwnership: lifecycleListenerOwners.size > 1
+      };
+      services.diagnostics.recordLifecycleEvent(event);
+      services.diagnostics.recordRuntimeHeartbeat({
+        lifecycleState: type,
+        visibilityState: document.visibilityState
       });
     };
     const onVisibilityChange = () => record('visibilitychange');
+    const onFocus = () => record('focus');
+    const onBlur = () => record('blur');
+    const onBeforeUnload = () => record('beforeunload');
     const onPageHide = (event: PageTransitionEvent) => {
       record('pagehide', { persisted: event.persisted, playbackStopRequested: true });
       void services.playback.stop('pagehide').then(
@@ -169,10 +200,16 @@ function StartupCoordinator() {
 
     record('lifecycle-listeners-attached');
     document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('blur', onBlur);
+    window.addEventListener('beforeunload', onBeforeUnload);
     window.addEventListener('pagehide', onPageHide);
     window.addEventListener('pageshow', onPageShow);
     return () => {
       document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('blur', onBlur);
+      window.removeEventListener('beforeunload', onBeforeUnload);
       window.removeEventListener('pagehide', onPageHide);
       window.removeEventListener('pageshow', onPageShow);
       lifecycleListenerOwners.delete(listenerOwner);

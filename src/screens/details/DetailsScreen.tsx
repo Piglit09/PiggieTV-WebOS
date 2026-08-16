@@ -46,7 +46,10 @@ const DETAIL_FIELDS = [
   'RecursiveItemCount',
   'UserData',
   'SeriesName',
+  'SeriesId',
   'SeasonName',
+  'SeasonId',
+  'ParentId',
   'IndexNumber',
   'ParentIndexNumber',
   'Artists',
@@ -63,6 +66,8 @@ const RELATED_VISIBLE_CARDS = 8;
 const RELATED_CARD_STEP = 206;
 const GENERIC_RELATED_VISIBLE_CARDS = 4;
 const GENERIC_RELATED_CARD_STEP = 428;
+const EPISODE_DETAIL_VISIBLE_CARDS = 5;
+const EPISODE_DETAIL_CARD_STEP = 322;
 const RELATED_CANDIDATE_LIMIT = 48;
 const RELATED_RESULT_LIMIT = 16;
 const MUSIC_MIX_CANDIDATE_LIMIT = 64;
@@ -178,6 +183,43 @@ function indexFromTrack(itemId: string, tracks: PtvItem[]) {
   return found >= 0 ? found : 0;
 }
 
+function buildEpisodeQueue(series: PtvItem | null, episodes: PtvItem[]) {
+  return episodes.map(episode => ({
+    itemId: episode.id,
+    title: episode.name,
+    seriesId: episode.seriesId ?? (series?.type === 'Series' ? series.id : undefined),
+    startPositionTicks: episode.playbackPositionTicks,
+    context: [episode.seriesName ?? series?.name, episodeLabel(episode)].filter(Boolean).join(' · ')
+  }));
+}
+
+function shuffledItems<T>(items: T[]) {
+  const shuffled = [...items];
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    const current = shuffled[index] as T;
+    shuffled[index] = shuffled[swapIndex] as T;
+    shuffled[swapIndex] = current;
+  }
+  return shuffled;
+}
+
+function episodeSeasonName(item: PtvItem) {
+  if (item.seasonName?.trim()) return item.seasonName.trim();
+  if (item.parentIndexNumber) return `Season ${item.parentIndexNumber}`;
+  return 'this season';
+}
+
+function compactRuntime(ticks?: number) {
+  if (!ticks || ticks <= 0) return null;
+  const totalMinutes = Math.max(1, Math.round(ticks / 600_000_000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours && minutes) return `${hours}h ${minutes}m`;
+  if (hours) return `${hours}h`;
+  return `${minutes}m`;
+}
+
 function supportsPremiumMix(item: PtvItem | null): item is PtvItem & {
   type: 'Audio' | 'MusicAlbum' | 'MusicArtist';
 } {
@@ -214,6 +256,15 @@ function RestartIcon() {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+    </svg>
+  );
+}
+
+function SeriesIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <rect x="3.25" y="4.25" width="17.5" height="15.5" rx="2.25" fill="none" stroke="currentColor" strokeWidth="1.9" />
+      <path d="M7.25 8.25h9.5M7.25 12h9.5M7.25 15.75h6.25" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
     </svg>
   );
 }
@@ -289,6 +340,14 @@ export function DetailsScreen() {
   const [episodesRetryNonce, setEpisodesRetryNonce] = useState(0);
   const [episodeStart, setEpisodeStart] = useState(0);
   const [episodePage, setEpisodePage] = useState(0);
+  const [seriesQueueLoading, setSeriesQueueLoading] = useState(false);
+  const [seriesQueueError, setSeriesQueueError] = useState<string | null>(null);
+  const [episodeSeries, setEpisodeSeries] = useState<PtvItem | null>(null);
+  const [sameSeasonEpisodes, setSameSeasonEpisodes] = useState<PtvItem[]>([]);
+  const [sameSeasonLoading, setSameSeasonLoading] = useState(false);
+  const [sameSeasonError, setSameSeasonError] = useState<string | null>(null);
+  const [sameSeasonRetryNonce, setSameSeasonRetryNonce] = useState(0);
+  const [sameSeasonStart, setSameSeasonStart] = useState(0);
   const [albumTracks, setAlbumTracks] = useState<PtvItem[]>([]);
   const [albumTracksLoading, setAlbumTracksLoading] = useState(false);
   const [albumTracksError, setAlbumTracksError] = useState<string | null>(null);
@@ -306,6 +365,7 @@ export function DetailsScreen() {
   const seasonSelectorRef = useRef<HTMLDivElement>(null);
   const pendingEpisodeFocus = useRef(false);
   const mixRequestRef = useRef<AbortController | null>(null);
+  const seriesQueueRequestRef = useRef<AbortController | null>(null);
   const preservedRelatedItemsByRoute = useRef<Map<string, PtvItem[]>>(new Map());
   const pendingRelatedFocusByRoute = useRef<Map<string, string>>(new Map());
   const client = useMemo(() => {
@@ -313,6 +373,15 @@ export function DetailsScreen() {
     return services.jellyfin.configureSession(state.serverUrl, userSession.accessToken);
   }, [state.serverUrl, userSession, services.jellyfin]);
   const detailMedia = useMemo(() => presentDetailMedia(item), [item]);
+  const activeEpisode = item?.type === 'Episode' && item.id === itemId ? item : null;
+  const activeEpisodeId = activeEpisode?.id ?? null;
+  const activeEpisodeSeriesId = activeEpisode?.seriesId ?? null;
+  const activeEpisodeSeasonId = activeEpisode?.seasonId ?? activeEpisode?.parentId ?? null;
+
+  useEffect(() => () => {
+    seriesQueueRequestRef.current?.abort('series-details-unmounted');
+    seriesQueueRequestRef.current = null;
+  }, []);
 
   useEffect(() => {
     if (!itemId || !client || !userSession || !cacheKey) return;
@@ -326,6 +395,16 @@ export function DetailsScreen() {
     setAlbumTracksError(null);
     setRelatedActive(false);
     setRelatedStart(0);
+    seriesQueueRequestRef.current?.abort('series-route-changed');
+    seriesQueueRequestRef.current = null;
+    setSeriesQueueLoading(false);
+    setSeriesQueueError(null);
+    setEpisodeSeries(null);
+    setSameSeasonEpisodes([]);
+    setSameSeasonLoading(false);
+    setSameSeasonError(null);
+    setSameSeasonRetryNonce(0);
+    setSameSeasonStart(0);
     setPosterFailed(false);
     setBackdropFailed(false);
     setLogoFailed(false);
@@ -348,6 +427,80 @@ export function DetailsScreen() {
 
     return () => controller.abort('details-route-hidden');
   }, [cacheKey, client, detailsRetryNonce, itemId, userSession]);
+
+  useEffect(() => {
+    if (!activeEpisodeId || !activeEpisodeSeriesId || !client || !userSession || !cacheKey) {
+      setEpisodeSeries(null);
+      return undefined;
+    }
+
+    const cachedSeries = readMediaMetadata(cacheKey, activeEpisodeSeriesId);
+    setEpisodeSeries(cachedSeries?.type === 'Series' ? cachedSeries : null);
+    if (cachedSeries?.type === 'Series') return undefined;
+
+    const controller = new AbortController();
+    void client.getItem(userSession.userId, activeEpisodeSeriesId, DETAIL_FIELDS, controller.signal)
+      .then(response => {
+        if (controller.signal.aborted) return;
+        const mapped = mapPtvItem(response);
+        if (mapped.type !== 'Series') return;
+        setEpisodeSeries(mapped);
+        writeMediaMetadata(cacheKey, mapped);
+      })
+      .catch(() => {
+        // The episode remains fully usable when optional series artwork is unavailable.
+      });
+
+    return () => controller.abort('episode-series-hidden');
+  }, [activeEpisodeId, activeEpisodeSeriesId, cacheKey, client, userSession]);
+
+  useEffect(() => {
+    if (!activeEpisodeId || !activeEpisodeSeriesId || !activeEpisodeSeasonId || !client || !userSession || !cacheKey) {
+      setSameSeasonEpisodes([]);
+      setSameSeasonLoading(false);
+      setSameSeasonError(null);
+      return undefined;
+    }
+
+    const cached = readSeriesEpisodes(cacheKey, activeEpisodeSeriesId);
+    if (cached?.seasonId === activeEpisodeSeasonId && sameSeasonRetryNonce === 0) {
+      setSameSeasonEpisodes(cached.items);
+      setSameSeasonLoading(false);
+      setSameSeasonError(null);
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    setSameSeasonEpisodes([]);
+    setSameSeasonStart(0);
+    setSameSeasonLoading(true);
+    setSameSeasonError(null);
+    void client.getEpisodes(userSession.userId, activeEpisodeSeriesId, activeEpisodeSeasonId, controller.signal)
+      .then(response => {
+        if (controller.signal.aborted) return;
+        const mapped = mapPtvItems(response).filter(episode => episode.type === 'Episode');
+        setSameSeasonEpisodes(mapped);
+        if (mapped.length > 0) {
+          writeSeriesEpisodes(cacheKey, activeEpisodeSeriesId, activeEpisodeSeasonId, mapped);
+        }
+        setSameSeasonLoading(false);
+      })
+      .catch(cause => {
+        if (controller.signal.aborted) return;
+        setSameSeasonLoading(false);
+        setSameSeasonError(redactSensitiveText(cause instanceof Error ? cause.message : 'Episodes from this season could not be loaded.'));
+      });
+
+    return () => controller.abort('episode-season-hidden');
+  }, [
+    activeEpisodeId,
+    activeEpisodeSeasonId,
+    activeEpisodeSeriesId,
+    cacheKey,
+    client,
+    sameSeasonRetryNonce,
+    userSession
+  ]);
 
   useEffect(() => {
     setSelectedAudioStreamIndex(pickDefaultAudioTrackIndex(detailMedia.audioTracks, undefined));
@@ -616,14 +769,14 @@ export function DetailsScreen() {
   }, [item, relatedItems, services.focusManager, state.route]);
 
   useEffect(() => {
-    if (item?.type !== 'Series') return undefined;
+    if (item?.type !== 'Series' && item?.type !== 'Episode') return undefined;
     const frame = window.requestAnimationFrame(() => {
       const focused = document.activeElement;
       if (!(focused instanceof HTMLElement)) return;
       revealFocusedDetailsControl(detailsContentRef.current, focused);
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [episodePage, episodes.length, item?.id, item?.type, relatedItems.length, seasons.length]);
+  }, [episodePage, episodes.length, item?.id, item?.type, relatedItems.length, sameSeasonEpisodes.length, seasons.length]);
 
   const startPlayback = (
     playable: PtvItem,
@@ -632,12 +785,19 @@ export function DetailsScreen() {
     queueSource: PtvItem | null = item
   ) => {
     if (!isPlayable(playable) || !state.userSession || !state.serverSession) return;
-    const hasAudioQueue = playbackKind(playable) === 'audio' && queueTracks.length > 0;
+    const kind = playbackKind(playable);
+    const hasAudioQueue = kind === 'audio' && queueTracks.length > 0;
+    const hasEpisodeQueue = kind === 'episode' && queueTracks.length > 0;
+    const hasQueue = hasAudioQueue || hasEpisodeQueue;
     const useSelectedStreams = item?.id === playable.id && item.type === 'Movie';
-    const audioQueueTracks = hasAudioQueue ? buildAudioQueueTracks(queueSource, queueTracks) : [];
-    const queueIndex = hasAudioQueue ? indexFromTrack(playable.id, queueTracks) : 0;
+    const queueItems = hasAudioQueue
+      ? buildAudioQueueTracks(queueSource, queueTracks)
+      : hasEpisodeQueue
+        ? buildEpisodeQueue(queueSource, queueTracks)
+        : [];
+    const queueIndex = hasQueue ? indexFromTrack(playable.id, queueTracks) : 0;
     const intent: PtvPlaybackIntent = {
-      kind: playbackKind(playable),
+      kind,
       itemId: playable.id,
       seriesId: playable.type === 'Episode'
         ? playable.seriesId ?? (item?.type === 'Series' ? item.id : undefined)
@@ -668,9 +828,9 @@ export function DetailsScreen() {
       startPositionTicks: restart ? 0 : playable.playbackPositionTicks,
       audioStreamIndex: useSelectedStreams ? selectedAudioStreamIndex : undefined,
       subtitleStreamIndex: useSelectedStreams ? selectedSubtitleStreamIndex : undefined,
-      queue: hasAudioQueue
+      queue: hasQueue
         ? {
-          items: audioQueueTracks.map((queueItem, queueIndexFromTrack) => ({
+          items: queueItems.map((queueItem, queueIndexFromTrack) => ({
             ...queueItem,
             artworkUrl:
               queueTracks[queueIndexFromTrack] && client
@@ -692,6 +852,40 @@ export function DetailsScreen() {
     const firstTrack = albumTracks[0];
     if (!firstTrack) return;
     startPlayback(firstTrack, false, albumTracks);
+  };
+
+  const startSeriesPlayback = (shuffle: boolean) => {
+    if (!item || item.type !== 'Series' || !client || !userSession || seriesQueueLoading) return;
+    seriesQueueRequestRef.current?.abort('series-queue-replaced');
+    const controller = new AbortController();
+    seriesQueueRequestRef.current = controller;
+    setSeriesQueueLoading(true);
+    setSeriesQueueError(null);
+
+    void client.getSeriesEpisodes(userSession.userId, item.id, controller.signal)
+      .then(response => {
+        if (controller.signal.aborted) return;
+        const availableEpisodes = mapPtvItems(response).filter(episode => episode.type === 'Episode');
+        const queue = shuffle ? shuffledItems(availableEpisodes) : availableEpisodes;
+        const firstEpisode = queue[0];
+        if (!firstEpisode) {
+          setSeriesQueueError('No playable episodes are available for this series.');
+          return;
+        }
+        startPlayback(firstEpisode, false, queue, item);
+      })
+      .catch(cause => {
+        if (controller.signal.aborted) return;
+        setSeriesQueueError(redactSensitiveText(
+          cause instanceof Error ? cause.message : 'Series episodes could not be loaded.'
+        ));
+      })
+      .finally(() => {
+        if (seriesQueueRequestRef.current === controller) {
+          seriesQueueRequestRef.current = null;
+        }
+        if (!controller.signal.aborted) setSeriesQueueLoading(false);
+      });
   };
 
   const startPremiumMix = () => {
@@ -783,7 +977,11 @@ export function DetailsScreen() {
 
   const revealRelated = (index: number) => {
     setRelatedActive(true);
-    const visibleCards = item?.type === 'Movie' ? RELATED_VISIBLE_CARDS : GENERIC_RELATED_VISIBLE_CARDS;
+    const visibleCards = item?.type === 'Movie'
+      ? RELATED_VISIBLE_CARDS
+      : item?.type === 'Episode'
+        ? EPISODE_DETAIL_VISIBLE_CARDS
+        : GENERIC_RELATED_VISIBLE_CARDS;
     setRelatedStart(current => {
       if (index < current) return index;
       if (index >= current + visibleCards) return index - visibleCards + 1;
@@ -797,6 +995,12 @@ export function DetailsScreen() {
     pendingRelatedFocusByRoute.current.set(routeId, `details-related-${related.id}`);
     if (cacheKey) writeMediaMetadata(cacheKey, related);
     dispatch({ type: 'set_route', route: buildRoute('details', related.id) });
+  };
+
+  const openSeriesDetails = () => {
+    if (item?.type !== 'Episode' || !item.seriesId) return;
+    if (cacheKey && episodeSeries) writeMediaMetadata(cacheKey, episodeSeries);
+    dispatch({ type: 'set_route', route: buildRoute('details', item.seriesId) });
   };
 
   const selectSeason = (season: PtvItem) => {
@@ -832,6 +1036,16 @@ export function DetailsScreen() {
     });
   };
 
+  const revealSameSeasonEpisode = (index: number) => {
+    setSameSeasonStart(current => {
+      if (index < current) return index;
+      if (index >= current + EPISODE_DETAIL_VISIBLE_CARDS) {
+        return index - EPISODE_DETAIL_VISIBLE_CARDS + 1;
+      }
+      return current;
+    });
+  };
+
   const changeEpisodePage = (nextPage: number) => {
     const pageCount = Math.max(1, Math.ceil(episodes.length / EPISODE_PAGE_SIZE));
     if (nextPage < 0 || nextPage >= pageCount || nextPage === episodePage) return;
@@ -840,12 +1054,17 @@ export function DetailsScreen() {
     setEpisodePage(nextPage);
   };
 
-  const posterUrl = artworkUrlForItem(client, item, 'poster');
-  const backdropUrl = artworkUrlForItem(client, item, 'hero');
-  const logoUrl = artworkUrlForItem(client, item, 'logo');
   const isMovie = item?.type === 'Movie';
+  const isEpisode = item?.type === 'Episode';
+  const detailImageUrl = artworkUrlForItem(client, item, isEpisode ? 'landscape' : 'poster');
+  const backdropUrl = artworkUrlForItem(client, item, 'hero')
+    ?? (isEpisode ? artworkUrlForItem(client, episodeSeries, 'hero') : null);
+  const logoUrl = isEpisode
+    ? artworkUrlForItem(client, episodeSeries, 'logo')
+    : artworkUrlForItem(client, item, 'logo');
   const previousScreen = state.routeHistory[state.routeHistory.length - 1]?.screen;
   const useMovieLayout = isMovie || (!item && previousScreen === 'movies');
+  const useCinematicActions = isMovie || isEpisode;
   const playbackProgress = isMovie && item ? itemProgress(item) : null;
   const selectedAudioTrack = selectedTrack(detailMedia.audioTracks, selectedAudioStreamIndex);
   const selectedSubtitleTrack = selectedTrack(detailMedia.subtitleTracks, selectedSubtitleStreamIndex);
@@ -861,10 +1080,15 @@ export function DetailsScreen() {
     episodePage * EPISODE_PAGE_SIZE,
     (episodePage + 1) * EPISODE_PAGE_SIZE
   );
+  const visibleSameSeasonEpisodes = sameSeasonEpisodes.filter(episode => episode.id !== item?.id);
+  const sameSeasonHeading = item?.type === 'Episode'
+    ? `More Episodes from ${episodeSeasonName(item)}`
+    : 'More Episodes';
+  const relatedCardStep = isEpisode ? EPISODE_DETAIL_CARD_STEP : GENERIC_RELATED_CARD_STEP;
 
   return (
     <LayoutShell title={item ? `${mediaTypeLabel(item)} details` : 'Details'} onBack={() => dispatch({ type: 'go_back' })}>
-      <section className={`ptv-details ${useMovieLayout ? 'ptv-details--movie' : ''} ${item?.type === 'Series' ? 'ptv-details--series' : ''}`.trim()}>
+      <section className={`ptv-details ${useMovieLayout ? 'ptv-details--movie' : ''} ${isEpisode ? 'ptv-details--episode' : ''} ${item?.type === 'Series' ? 'ptv-details--series' : ''}`.trim()}>
         {backdropUrl && !backdropFailed ? (
           <img
             src={backdropUrl}
@@ -879,33 +1103,59 @@ export function DetailsScreen() {
           ref={detailsContentRef}
           className={`ptv-details__content ${relatedActive ? 'is-related-active' : ''}`.trim()}
           onFocusCapture={event => {
-            if (item?.type !== 'Series') return;
+            if (item?.type !== 'Series' && item?.type !== 'Episode') return;
             revealFocusedDetailsControl(detailsContentRef.current, event.target as HTMLElement);
           }}
         >
           <div className="ptv-details__summary">
             <div className="ptv-details__poster-wrap">
-              {posterUrl && !posterFailed ? (
-                <img src={posterUrl} alt="" className="ptv-details-image" onError={() => setPosterFailed(true)} />
+              {detailImageUrl && !posterFailed ? (
+                <img src={detailImageUrl} alt="" className="ptv-details-image" onError={() => setPosterFailed(true)} />
               ) : (
                 <div className="ptv-details-image ptv-image-placeholder" aria-hidden="true">
                   <span>PTV</span>
                 </div>
               )}
+              {isEpisode ? (
+                <span className="ptv-details__episode-marker" aria-hidden="true">
+                  <PlayIcon />
+                </span>
+              ) : null}
             </div>
             <div className="ptv-details__copy">
-              {!isMovie ? <span className="ptv-eyebrow">{item ? mediaTypeLabel(item) : 'Media'}</span> : null}
-              {isMovie && logoUrl && !logoFailed ? (
+              {isEpisode ? (
                 <>
-                  <img
-                    src={logoUrl}
-                    alt=""
-                    className="ptv-details__logo"
-                    onError={() => setLogoFailed(true)}
-                  />
-                  <h2 className="ptv-visually-hidden">{item.name}</h2>
+                  {logoUrl && !logoFailed ? (
+                    <img
+                      src={logoUrl}
+                      alt=""
+                      className="ptv-details__logo"
+                      onError={() => setLogoFailed(true)}
+                    />
+                  ) : item?.seriesName ? (
+                    <span className="ptv-details__series-name">{item.seriesName}</span>
+                  ) : null}
+                  <span className="ptv-eyebrow ptv-details__episode-label">
+                    {[item ? episodeLabel(item) : null, 'Episode'].filter(Boolean).join(' · ')}
+                  </span>
+                  <h2>{item?.name ?? (loading ? 'Loading…' : 'Unavailable')}</h2>
                 </>
-              ) : <h2>{item?.name ?? (loading ? 'Loading…' : 'Unavailable')}</h2>}
+              ) : (
+                <>
+                  {!isMovie ? <span className="ptv-eyebrow">{item ? mediaTypeLabel(item) : 'Media'}</span> : null}
+                  {isMovie && logoUrl && !logoFailed ? (
+                    <>
+                      <img
+                        src={logoUrl}
+                        alt=""
+                        className="ptv-details__logo"
+                        onError={() => setLogoFailed(true)}
+                      />
+                      <h2 className="ptv-visually-hidden">{item?.name}</h2>
+                    </>
+                  ) : <h2>{item?.name ?? (loading ? 'Loading…' : 'Unavailable')}</h2>}
+                </>
+              )}
               {error ? <p className="ptv-error">{error}</p> : null}
               {error && !item ? (
                 <FocusableButton
@@ -937,6 +1187,18 @@ export function DetailsScreen() {
                       </ul>
                     ) : null}
                   </div>
+                ) : isEpisode ? (
+                  <div className="ptv-details__meta ptv-details__meta--episode">
+                    {item.productionYear ? <span>{item.productionYear}</span> : null}
+                    {compactRuntime(item.runTimeTicks) ? <span>{compactRuntime(item.runTimeTicks)}</span> : null}
+                    {item.officialRating ? <span>{item.officialRating}</span> : null}
+                    {item.communityRating ? (
+                      <span className="ptv-details__rating">
+                        <RatingStarIcon />
+                        <span>{item.communityRating.toFixed(1)}</span>
+                      </span>
+                    ) : null}
+                  </div>
                 ) : <p className="ptv-details__meta">{meta.join(' · ')}</p>
               ) : null}
               {item?.genres?.length ? (
@@ -944,7 +1206,7 @@ export function DetailsScreen() {
                   <ul className="ptv-details__genres ptv-details__genres--movie" aria-label="Genres">
                     {item.genres.slice(0, 4).map(genre => <li key={genre}>{genre}</li>)}
                   </ul>
-                ) : <p className="ptv-details__genres">{item.genres.slice(0, 4).join('  /  ')}</p>
+                ) : <p className={`ptv-details__genres ${isEpisode ? 'ptv-details__genres--episode' : ''}`.trim()}>{item.genres.slice(0, 4).join('  /  ')}</p>
               ) : null}
               <p className="ptv-details__overview">
                 {cleanOverview(item?.overview) || (item ? 'No overview available.' : '')}
@@ -1021,28 +1283,66 @@ export function DetailsScreen() {
                   {albumTracksError ? <p className="ptv-error">{albumTracksError}</p> : null}
                 </div>
               ) : null}
+              {item?.type === 'Series' ? (
+                <div className="ptv-details__actions">
+                  <FocusableButton
+                    focusId="details-series-play-all"
+                    preferredRow="details-actions"
+                    className="ptv-primary-action"
+                    onFocus={returnToHero}
+                    onClick={() => startSeriesPlayback(false)}
+                    disabled={seriesQueueLoading}
+                  >
+                    <PlayIcon />
+                    <span>{seriesQueueLoading ? 'Loading episodes…' : 'Play All'}</span>
+                  </FocusableButton>
+                  <FocusableButton
+                    focusId="details-series-shuffle-all"
+                    preferredRow="details-actions"
+                    className="ptv-secondary-action"
+                    onFocus={returnToHero}
+                    onClick={() => startSeriesPlayback(true)}
+                    disabled={seriesQueueLoading}
+                  >
+                    <span>Shuffle All</span>
+                  </FocusableButton>
+                  {seriesQueueError ? <p className="ptv-error" role="alert">{seriesQueueError}</p> : null}
+                </div>
+              ) : null}
               {item && item.type !== 'Series' && item.type !== 'MusicAlbum' && isPlayable(item) ? (
                 <div className="ptv-details__actions">
                   <FocusableButton
                     focusId="details-primary"
                     preferredRow="details-actions"
-                    className={`ptv-primary-action ${isMovie ? 'ptv-details__action' : ''}`}
+                    className={`ptv-primary-action ${useCinematicActions ? 'ptv-details__action' : ''}`}
                     onFocus={returnToHero}
                     onClick={() => startPlayback(item)}
                   >
-                    {isMovie ? <PlayIcon /> : null}
+                    {useCinematicActions ? <PlayIcon /> : null}
                     <span>{item.playbackPositionTicks ? 'Resume' : 'Play'}</span>
                   </FocusableButton>
                   {item.playbackPositionTicks ? (
                     <FocusableButton
                       focusId="details-restart"
                       preferredRow="details-actions"
-                      className={`ptv-secondary-action ${isMovie ? 'ptv-details__action' : ''}`}
+                      className={`ptv-secondary-action ${useCinematicActions ? 'ptv-details__action' : ''}`}
                       onFocus={returnToHero}
                       onClick={() => startPlayback(item, true)}
                     >
-                      {isMovie ? <RestartIcon /> : null}
+                      {useCinematicActions ? <RestartIcon /> : null}
                       <span>Restart</span>
+                    </FocusableButton>
+                  ) : null}
+                  {item.type === 'Episode' && item.seriesId ? (
+                    <FocusableButton
+                      focusId="details-series"
+                      preferredRow="details-actions"
+                      className="ptv-secondary-action ptv-details__action ptv-details__action--series"
+                      onFocus={returnToHero}
+                      onClick={openSeriesDetails}
+                    >
+                      <SeriesIcon />
+                      <span>Series Details</span>
                     </FocusableButton>
                   ) : null}
                   {item.type === 'Audio' ? (
@@ -1248,8 +1548,61 @@ export function DetailsScreen() {
             </div>
           ) : null}
 
+          {item?.type === 'Episode' ? (
+            <section className="ptv-series-browser ptv-details__episode-shelf" aria-labelledby="ptv-more-episodes-heading">
+              <div className="ptv-episode-line">
+                <div className="ptv-episode-line__heading">
+                  <h3 id="ptv-more-episodes-heading">{sameSeasonHeading}</h3>
+                  {sameSeasonLoading ? <span className="ptv-muted">Loading episodes…</span> : null}
+                  {sameSeasonError ? <span className="ptv-error">{sameSeasonError}</span> : null}
+                  {sameSeasonError ? (
+                    <FocusableButton
+                      focusId="details-season-episodes-retry"
+                      preferredRow="details-season-episodes"
+                      className="ptv-secondary-action"
+                      onClick={() => setSameSeasonRetryNonce(value => value + 1)}
+                    >
+                      Retry
+                    </FocusableButton>
+                  ) : null}
+                </div>
+
+                {visibleSameSeasonEpisodes.length ? (
+                  <div className="ptv-episode-viewport">
+                    <ul
+                      className="ptv-episode-grid"
+                      style={{ transform: `translate3d(${-sameSeasonStart * EPISODE_DETAIL_CARD_STEP}px, 0, 0)` }}
+                    >
+                      {visibleSameSeasonEpisodes.map((episode, index) => (
+                        <CardTile
+                          key={episode.id}
+                          focusId={`details-season-episode-${episode.id}`}
+                          preferredRow="details-season-episodes"
+                          item={episode}
+                          variant="episode"
+                          posterUrl={artworkUrlForItem(client, episode, 'landscape')}
+                          context={episodeLabel(episode)}
+                          meta={compactRuntime(episode.runTimeTicks)}
+                          progressPercent={itemProgress(episode)}
+                          watched={Boolean(episode.played)}
+                          onFocus={() => revealSameSeasonEpisode(index)}
+                          onOpen={() => startPlayback(episode)}
+                          lazy
+                        />
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+
+                {!sameSeasonLoading && !sameSeasonError && visibleSameSeasonEpisodes.length === 0 ? (
+                  <p className="ptv-muted">No other episodes are available from this season.</p>
+                ) : null}
+              </div>
+            </section>
+          ) : null}
+
           {item && !isMovie && canNavigateToDetails(item) ? (
-            <section className="ptv-series-browser" aria-labelledby="ptv-related-heading">
+            <section className={`ptv-series-browser ${isEpisode ? 'ptv-details__episode-shelf' : ''}`.trim()} aria-labelledby="ptv-related-heading">
               <div className="ptv-episode-line">
                 <div className="ptv-episode-line__heading">
                   <h3 id="ptv-related-heading">More Like This</h3>
@@ -1282,7 +1635,7 @@ export function DetailsScreen() {
                   <div className="ptv-episode-viewport">
                     <ul
                       className="ptv-episode-grid"
-                      style={{ transform: `translate3d(${-relatedStart * GENERIC_RELATED_CARD_STEP}px, 0, 0)` }}
+                      style={{ transform: `translate3d(${-relatedStart * relatedCardStep}px, 0, 0)` }}
                     >
                       {relatedItems.map((related, index) => (
                         <CardTile

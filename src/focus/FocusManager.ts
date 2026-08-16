@@ -22,6 +22,7 @@ export type FocusTransitionReason =
   | 'route-restore'
   | 'route-fallback'
   | 'unregister-fallback'
+  | 'pending-focus-fallback'
   | 'missing-focus-fallback'
   | 'activate';
 
@@ -49,10 +50,78 @@ export interface FocusTransition {
   fallbackUsed: boolean;
 }
 
+export type FocusReconciliationEventType =
+  | 'directional-target-calculated'
+  | 'focus-requested'
+  | 'native-focus-applied'
+  | 'native-focus-failed'
+  | 'dom-focus-accepted'
+  | 'dom-focus-reconciled'
+  | 'register'
+  | 'unregister'
+  | 'pending-focus-created'
+  | 'pending-focus-restored'
+  | 'pending-focus-failed'
+  | 'fallback-applied'
+  | 'reconciliation-violation'
+  | 'render-window-commit';
+
+export interface FocusReconciliationEvent {
+  timestamp: number;
+  type: FocusReconciliationEventType;
+  routeId: string | null;
+  focusId: string | null;
+  requestedFocusId: string | null;
+  registeredFocusId: string | null;
+  unregisteredFocusId: string | null;
+  logicalFocusId: string | null;
+  nativeFocusId: string | null;
+  pendingFocusId: string | null;
+  inputKey: string | null;
+  reason: FocusTransitionReason | string | null;
+  direction: PtvFocusDirection | null;
+  targetMounted: boolean;
+  interactionMode: FocusInteractionMode;
+  pendingToken: number | null;
+  fallbackReason: string | null;
+  nativeFocusApplied: boolean | null;
+  reconciliationViolation: boolean;
+  renderWindowStart: number | null;
+}
+
+interface FocusReconciliationMetadata {
+  direction?: PtvFocusDirection | null;
+  fallbackReason?: string | null;
+  focusId?: string | null;
+  inputKey?: string | null;
+  nativeFocusApplied?: boolean | null;
+  pendingFocusId?: string | null;
+  pendingToken?: number | null;
+  reason?: FocusTransitionReason | string | null;
+  reconciliationViolation?: boolean;
+  registeredFocusId?: string | null;
+  renderWindowStart?: number | null;
+  requestedFocusId?: string | null;
+  routeId?: string | null;
+  targetMounted?: boolean;
+  unregisteredFocusId?: string | null;
+}
+
 export interface FocusNavigationResult {
   current: string | null;
+  nativeFocusApplied?: boolean;
   previous: string | null;
   transition?: FocusTransition;
+}
+
+export type FocusInteractionMode = 'remote' | 'pointer';
+
+export interface FocusInteractionState {
+  mode: FocusInteractionMode;
+  lastPointerX: number | null;
+  lastPointerY: number | null;
+  lastPointerMotionTimestamp: number | null;
+  pointerBaselinePending: boolean;
 }
 
 export interface FocusRouteOptions {
@@ -66,6 +135,18 @@ interface PendingRouteRestore {
   routeId: string;
   targetId: string | null;
   fallbackFocusId: string | null;
+}
+
+interface DirectionalFocusReservation {
+  direction: PtvFocusDirection;
+  inputKey: string | null;
+  routeId: string | null;
+  settled: boolean;
+  targetId: string;
+}
+
+interface PendingDirectionalFocus extends DirectionalFocusReservation {
+  token: number;
 }
 
 const MIN_DELTA_PX = 12;
@@ -108,13 +189,22 @@ export class FocusManager {
   private nodes = new Map<string, FocusNodeRegistration>();
   private focusOrder: string[] = [];
   private currentFocus: string | null = null;
-  private pointerFocused = false;
+  private interactionModeValue: FocusInteractionMode = 'remote';
+  private lastPointerX: number | null = null;
+  private lastPointerY: number | null = null;
+  private lastPointerMotionTimestamp: number | null = null;
+  private pointerBaselinePending = true;
   private listeners = new Set<(current: string | null, previous: string | null) => void>();
   private transitionListeners = new Set<(transition: FocusTransition) => void>();
+  private reconciliationListeners = new Set<(event: FocusReconciliationEvent) => void>();
   private lastInteractive: string | null = null;
   private lastFocusTransition: FocusTransition | null = null;
   private activeRouteId: string | null = null;
   private pendingRouteRestore: PendingRouteRestore | null = null;
+  private directionalReservation: DirectionalFocusReservation | null = null;
+  private pendingDirectionalFocus: PendingDirectionalFocus | null = null;
+  private nextPendingFocusToken = 1;
+  private currentRenderWindowStart: number | null = null;
   private routeFocusMemory = new Map<string, string>();
   private readonly maxHistory = 18;
   private lastPreviousFocusId: string | null = null;
@@ -129,12 +219,31 @@ export class FocusManager {
     }
     this.nodes.set(node.id, node);
 
-    const restoredPendingRoute = this.tryPendingRouteRestore(node);
-    if (!restoredPendingRoute && !this.currentFocus && this.isInActiveRoute(node) && !this.isWaitingForAnotherNode(node)) {
+    this.publishReconciliationEvent('register', {
+      focusId: node.id,
+      registeredFocusId: node.id,
+      routeId: node.routeId,
+      targetMounted: node.ref.isConnected
+    });
+
+    const restoredPendingDirectional = this.tryPendingDirectionalFocus(node);
+
+    const restoredPendingRoute = !restoredPendingDirectional && this.tryPendingRouteRestore(node);
+    if (
+      !restoredPendingDirectional
+      && !restoredPendingRoute
+      && !this.currentFocus
+      && this.isInActiveRoute(node)
+      && !this.isWaitingForAnotherNode(node)
+    ) {
       this.applyFocus(node.id, { reason: 'register', routeId: node.routeId });
-    } else if (!restoredPendingRoute && this.currentFocus === node.id) {
+    } else if (!restoredPendingDirectional && !restoredPendingRoute && this.currentFocus === node.id) {
       this.pushHistory(node.id);
-      this.focusNodeIfAllowed(node.id);
+      this.focusNodeIfAllowed(node.id, {
+        focusId: node.id,
+        reason: 'register',
+        routeId: node.routeId
+      });
       this.notify(this.currentFocus);
     }
 
@@ -151,8 +260,18 @@ export class FocusManager {
 
     this.nodes.delete(id);
     this.focusOrder = this.focusOrder.filter(candidate => candidate !== id);
+    this.publishReconciliationEvent('unregister', {
+      focusId: id,
+      routeId: registeredNode.routeId,
+      targetMounted: false,
+      unregisteredFocusId: id
+    });
 
     if (this.currentFocus !== id) {
+      if (this.pendingDirectionalFocus?.targetId === this.currentFocus) {
+        this.notify();
+        return;
+      }
       if (this.currentFocus && !this.nodes.has(this.currentFocus)) {
         this.moveToFallback(this.currentFocus);
       } else {
@@ -163,9 +282,39 @@ export class FocusManager {
 
     const previous = this.currentFocus;
     const previousRouteId = registeredNode.routeId ?? this.activeRouteId;
+
+    if (this.directionalReservation?.targetId === id && !this.directionalReservation.settled) {
+      const token = this.nextPendingFocusToken;
+      this.nextPendingFocusToken += 1;
+      this.pendingDirectionalFocus = {
+        ...this.directionalReservation,
+        token
+      };
+      this.publishReconciliationEvent('pending-focus-created', {
+        direction: this.directionalReservation.direction,
+        focusId: id,
+        inputKey: this.directionalReservation.inputKey,
+        pendingFocusId: id,
+        pendingToken: token,
+        reason: 'directional',
+        routeId: this.directionalReservation.routeId,
+        targetMounted: false
+      });
+      this.notify(previous);
+      return { current: previous, previous };
+    }
+
     this.currentFocus = null;
     const fallback = this.findValidFallbackId(previous, this.activeRouteId);
     if (fallback) {
+      this.publishReconciliationEvent('fallback-applied', {
+        fallbackReason: 'focused-node-unregistered-without-directional-reservation',
+        focusId: fallback,
+        reason: 'unregister-fallback',
+        requestedFocusId: previous,
+        routeId: this.activeRouteId,
+        targetMounted: true
+      });
       this.applyFocus(fallback, {
         reason: 'unregister-fallback',
         routeId: this.activeRouteId,
@@ -184,13 +333,50 @@ export class FocusManager {
     return { current: null, previous, transition };
   }
 
-  public setPointerFocusActive(active: boolean) {
-    const wasPointerFocused = this.pointerFocused;
-    this.pointerFocused = active;
+  public recordPointerMovement(clientX: number, clientY: number, timestamp = Date.now()) {
+    if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return false;
 
-    if (wasPointerFocused && !active && this.currentFocus) {
+    const moved = this.lastPointerX === null
+      || this.lastPointerY === null
+      || this.lastPointerX !== clientX
+      || this.lastPointerY !== clientY;
+    this.lastPointerX = clientX;
+    this.lastPointerY = clientY;
+    if (!moved) return false;
+
+    this.lastPointerMotionTimestamp = timestamp;
+    if (this.pointerBaselinePending) {
+      // webOS/Chromium can emit one coordinate-changing mousemove when a
+      // runner-owned window is activated or content shifts under the OS
+      // cursor. Re-baseline that first sample after DPAD; a subsequent
+      // coordinate change is required to prove ongoing pointer intent.
+      this.pointerBaselinePending = false;
+      return false;
+    }
+    this.interactionModeValue = 'pointer';
+    return true;
+  }
+
+  public claimPointerInteraction() {
+    this.clearDirectionalFocusState();
+    this.pointerBaselinePending = false;
+    this.interactionModeValue = 'pointer';
+  }
+
+  public claimRemoteInteraction() {
+    const wasPointer = this.interactionModeValue === 'pointer';
+    this.interactionModeValue = 'remote';
+    this.pointerBaselinePending = true;
+    if (wasPointer && this.currentFocus) {
       this.focusNodeIfAllowed(this.currentFocus);
     }
+  }
+
+  public focusFromPointer(id: string, metadata: FocusMoveMetadata = {}): FocusNavigationResult {
+    if (this.interactionModeValue !== 'pointer') {
+      return { current: this.currentFocus, previous: this.currentFocus };
+    }
+    return this.focus(id, { ...metadata, reason: metadata.reason ?? 'pointer' });
   }
 
   public subscribe(listener: (current: string | null, previous: string | null) => void) {
@@ -208,13 +394,35 @@ export class FocusManager {
     };
   }
 
+  public subscribeReconciliationEvents(listener: (event: FocusReconciliationEvent) => void) {
+    this.reconciliationListeners.add(listener);
+    return () => {
+      this.reconciliationListeners.delete(listener);
+    };
+  }
+
   public clearListeners() {
     this.listeners.clear();
     this.transitionListeners.clear();
+    this.reconciliationListeners.clear();
   }
 
   public get focusId() {
     return this.currentFocus || null;
+  }
+
+  public get interactionMode() {
+    return this.interactionModeValue;
+  }
+
+  public get interactionState(): FocusInteractionState {
+    return {
+      mode: this.interactionModeValue,
+      lastPointerX: this.lastPointerX,
+      lastPointerY: this.lastPointerY,
+      lastPointerMotionTimestamp: this.lastPointerMotionTimestamp,
+      pointerBaselinePending: this.pointerBaselinePending
+    };
   }
 
   public get previousFocusId() {
@@ -230,6 +438,10 @@ export class FocusManager {
 
   public get lastTransition() {
     return this.lastFocusTransition ? { ...this.lastFocusTransition } : null;
+  }
+
+  public get pendingFocusId() {
+    return this.pendingDirectionalFocus?.targetId ?? null;
   }
 
   public clearFocusHistory() {
@@ -257,6 +469,8 @@ export class FocusManager {
 
     this.activeRouteId = normalizedRouteId;
     this.pendingRouteRestore = null;
+    this.clearDirectionalFocusState();
+    this.currentRenderWindowStart = null;
 
     if (!normalizedRouteId) {
       const transition = this.publishTransition(previous, this.currentFocus, {
@@ -398,14 +612,222 @@ export class FocusManager {
   }
 
   public focus(id: string, metadata: FocusMoveMetadata = {}): FocusNavigationResult {
+    if (metadata.reason === 'dom-focus') {
+      return this.handleDomFocus(id, metadata);
+    }
     const node = this.nodes.get(id);
     if (!node || !this.isInteractive(node) || !this.isInActiveRoute(node)) {
       return { current: this.currentFocus, previous: this.currentFocus };
     }
+    if (metadata.reason !== 'directional') {
+      this.clearDirectionalFocusState();
+    }
     return this.applyFocus(id, { reason: metadata.reason ?? 'direct', ...metadata });
   }
 
+  public handleDomFocus(id: string, metadata: FocusMoveMetadata = {}): FocusNavigationResult {
+    const previous = this.currentFocus;
+    const node = this.nodes.get(id);
+    if (!node || !this.isInteractive(node) || !this.isInActiveRoute(node)) {
+      this.publishReconciliationEvent('reconciliation-violation', {
+        focusId: id,
+        reason: metadata.reason ?? 'dom-focus',
+        reconciliationViolation: true,
+        requestedFocusId: id,
+        routeId: metadata.routeId,
+        targetMounted: Boolean(node?.ref.isConnected)
+      });
+      return { current: previous, previous };
+    }
+
+    if (id === previous) {
+      this.publishReconciliationEvent('dom-focus-accepted', {
+        focusId: id,
+        reason: metadata.reason ?? 'dom-focus',
+        requestedFocusId: id,
+        routeId: metadata.routeId ?? node.routeId,
+        targetMounted: true
+      });
+      return { current: previous, previous };
+    }
+
+    const reservation = this.directionalReservation ?? this.pendingDirectionalFocus;
+    const authoritativeId = reservation?.targetId ?? null;
+    const authoritativeNode = authoritativeId ? this.nodes.get(authoritativeId) : undefined;
+    const isPendingAuthoritativeHandoff = Boolean(
+      this.pendingDirectionalFocus
+      && authoritativeId
+      && authoritativeId === previous
+    );
+    const canRestoreAuthoritative = Boolean(
+      authoritativeNode
+      && this.isInteractive(authoritativeNode)
+      && this.isInActiveRoute(authoritativeNode)
+    );
+    if (
+      this.interactionModeValue === 'remote'
+      && authoritativeId
+      && authoritativeId === previous
+      && authoritativeId !== id
+      && (canRestoreAuthoritative || isPendingAuthoritativeHandoff)
+    ) {
+      this.publishReconciliationEvent('reconciliation-violation', {
+        direction: reservation?.direction,
+        focusId: id,
+        inputKey: reservation?.inputKey,
+        reason: metadata.reason ?? 'dom-focus',
+        reconciliationViolation: true,
+        requestedFocusId: authoritativeId,
+        routeId: reservation?.routeId ?? metadata.routeId,
+        targetMounted: canRestoreAuthoritative
+      });
+      if (isPendingAuthoritativeHandoff && node.ref.ownerDocument.activeElement === node.ref) {
+        node.ref.blur();
+      }
+      const restored = canRestoreAuthoritative
+        ? this.focusNodeIfAllowed(authoritativeId, {
+          direction: reservation?.direction,
+          focusId: authoritativeId,
+          inputKey: reservation?.inputKey,
+          pendingFocusId: this.pendingDirectionalFocus?.targetId,
+          pendingToken: this.pendingDirectionalFocus?.token,
+          reason: 'directional',
+          requestedFocusId: authoritativeId,
+          routeId: reservation?.routeId ?? metadata.routeId
+        })
+        : false;
+      this.publishReconciliationEvent('dom-focus-reconciled', {
+        direction: reservation?.direction,
+        focusId: authoritativeId,
+        inputKey: reservation?.inputKey,
+        nativeFocusApplied: restored,
+        pendingFocusId: this.pendingDirectionalFocus?.targetId,
+        pendingToken: this.pendingDirectionalFocus?.token,
+        reason: 'directional',
+        reconciliationViolation: canRestoreAuthoritative && !restored,
+        requestedFocusId: authoritativeId,
+        routeId: reservation?.routeId ?? metadata.routeId,
+        targetMounted: canRestoreAuthoritative
+      });
+      return { current: this.currentFocus, previous: this.currentFocus };
+    }
+
+    this.clearDirectionalFocusState();
+    this.publishReconciliationEvent('dom-focus-accepted', {
+      focusId: id,
+      reason: metadata.reason ?? 'dom-focus',
+      requestedFocusId: id,
+      routeId: metadata.routeId ?? node.routeId,
+      targetMounted: true
+    });
+    return this.applyFocus(id, { reason: 'dom-focus', ...metadata });
+  }
+
+  public failPendingDirectionalFocus(
+    reason: string,
+    fallbackFocusId?: string | null
+  ): FocusNavigationResult {
+    const pending = this.pendingDirectionalFocus;
+    const previous = this.currentFocus;
+    if (!pending) return { current: previous, previous };
+
+    this.publishReconciliationEvent('pending-focus-failed', {
+      direction: pending.direction,
+      fallbackReason: reason,
+      focusId: pending.targetId,
+      inputKey: pending.inputKey,
+      pendingFocusId: pending.targetId,
+      pendingToken: pending.token,
+      reason: 'pending-focus-fallback',
+      requestedFocusId: pending.targetId,
+      routeId: pending.routeId,
+      targetMounted: false
+    });
+    this.clearDirectionalFocusState();
+    const fallback = fallbackFocusId && this.canFocusForRoute(fallbackFocusId, pending.routeId ?? '')
+      ? fallbackFocusId
+      : this.findValidFallbackId(previous, pending.routeId);
+    if (!fallback) {
+      this.currentFocus = null;
+      const transition = this.publishTransition(previous, null, {
+        reason: 'pending-focus-fallback',
+        inputKey: pending.inputKey,
+        routeId: pending.routeId,
+        direction: pending.direction,
+        fallbackUsed: false
+      });
+      this.notify(previous);
+      return { current: null, previous, transition };
+    }
+    this.currentFocus = null;
+    this.publishReconciliationEvent('fallback-applied', {
+      direction: pending.direction,
+      fallbackReason: reason,
+      focusId: fallback,
+      inputKey: pending.inputKey,
+      reason: 'pending-focus-fallback',
+      requestedFocusId: pending.targetId,
+      routeId: pending.routeId,
+      targetMounted: true
+    });
+    return this.applyFocus(fallback, {
+      reason: 'pending-focus-fallback',
+      inputKey: pending.inputKey,
+      routeId: pending.routeId,
+      direction: pending.direction,
+      fallbackUsed: true,
+      remember: false
+    }, previous);
+  }
+
+  public reconcileCurrentFocus(
+    reason = 'render-window-commit',
+    renderWindowStart?: number | null
+  ) {
+    if (renderWindowStart !== undefined) {
+      this.currentRenderWindowStart = renderWindowStart;
+    }
+    const focusId = this.currentFocus;
+    const node = focusId ? this.nodes.get(focusId) : undefined;
+    const mounted = Boolean(node && this.isInteractive(node));
+    const nativeFocusId = this.readNativeFocusId();
+    const agrees = Boolean(focusId && mounted && nativeFocusId === focusId);
+    this.publishReconciliationEvent(
+      agrees ? 'render-window-commit' : 'reconciliation-violation',
+      {
+        focusId,
+        nativeFocusApplied: agrees,
+        reason,
+        reconciliationViolation: !agrees,
+        renderWindowStart,
+        requestedFocusId: focusId,
+        routeId: node?.routeId ?? this.activeRouteId,
+        targetMounted: mounted
+      }
+    );
+    if (focusId && mounted && !agrees) {
+      const restored = this.focusNodeIfAllowed(focusId, {
+        focusId,
+        reason,
+        renderWindowStart,
+        requestedFocusId: focusId,
+        routeId: node?.routeId ?? this.activeRouteId
+      });
+      if (restored && this.directionalReservation?.targetId === focusId) {
+        this.directionalReservation.settled = true;
+      }
+      return restored;
+    }
+    if (agrees && this.directionalReservation?.targetId === focusId) {
+      this.directionalReservation.settled = true;
+    }
+    return agrees;
+  }
+
   public activateCurrent(metadata: FocusMoveMetadata = {}) {
+    if (metadata.reason === 'activate' || metadata.inputKey === 'Enter') {
+      this.claimRemoteInteraction();
+    }
     const currentFocus = this.currentFocus;
     if (!currentFocus) return false;
     const current = this.nodes.get(currentFocus);
@@ -431,6 +853,7 @@ export class FocusManager {
   }
 
   public move(direction: PtvFocusDirection, metadata: FocusMoveMetadata = {}): FocusNavigationResult {
+    this.claimRemoteInteraction();
     const currentFocus = this.currentFocus;
     if (!currentFocus) return this.focusDirectionFallback(direction, metadata);
     const current = this.nodes.get(currentFocus);
@@ -454,6 +877,23 @@ export class FocusManager {
     }
 
     if (!bestId) return this.focusDirectionFallback(direction, metadata);
+    this.publishReconciliationEvent('directional-target-calculated', {
+      direction,
+      focusId: currentFocus,
+      inputKey: metadata.inputKey,
+      reason: metadata.reason ?? 'directional',
+      requestedFocusId: bestId,
+      routeId: metadata.routeId ?? routeId,
+      targetMounted: Boolean(this.nodes.get(bestId)?.ref.isConnected)
+    });
+    this.directionalReservation = {
+      direction,
+      inputKey: metadata.inputKey ?? null,
+      routeId: normalizeRouteId(metadata.routeId) ?? normalizeRouteId(routeId),
+      settled: false,
+      targetId: bestId
+    };
+    this.pendingDirectionalFocus = null;
     return this.applyFocus(bestId, {
       reason: metadata.reason ?? 'directional',
       inputKey: metadata.inputKey,
@@ -464,6 +904,7 @@ export class FocusManager {
   }
 
   public restorePrevious(metadata: FocusMoveMetadata = {}): FocusNavigationResult {
+    this.clearDirectionalFocusState();
     if (!this.currentFocus) {
       return { current: null, previous: null };
     }
@@ -499,6 +940,7 @@ export class FocusManager {
   }
 
   public focusDirectionFallback(direction: PtvFocusDirection, metadata: FocusMoveMetadata = {}): FocusNavigationResult {
+    this.clearDirectionalFocusState();
     const currentFocus = this.currentFocus;
     const currentNode = currentFocus ? this.nodes.get(currentFocus) : undefined;
     const routeId = currentNode?.routeId ?? this.activeRouteId;
@@ -561,12 +1003,39 @@ export class FocusManager {
   ): FocusNavigationResult {
     const node = this.nodes.get(id);
     if (!node || !this.isInteractive(node) || !this.isInActiveRoute(node)) {
+      this.publishReconciliationEvent('reconciliation-violation', {
+        direction: metadata.direction,
+        focusId: id,
+        inputKey: metadata.inputKey,
+        reason: metadata.reason,
+        reconciliationViolation: true,
+        requestedFocusId: id,
+        routeId: metadata.routeId,
+        targetMounted: Boolean(node?.ref.isConnected)
+      });
       return { current: this.currentFocus, previous: this.currentFocus };
     }
 
     const previous = previousOverride === undefined ? this.currentFocus : previousOverride;
     if (this.currentFocus === id && previous === id) {
-      return { current: this.currentFocus, previous: this.currentFocus };
+      // The logical ID can survive while virtualization replaces its DOM
+      // registration. Re-apply native focus to the currently registered node.
+      const nativeFocusApplied = this.focusNodeIfAllowed(id, {
+        direction: metadata.direction,
+        focusId: id,
+        inputKey: metadata.inputKey,
+        pendingFocusId: this.pendingDirectionalFocus?.targetId,
+        pendingToken: this.pendingDirectionalFocus?.token,
+        reason: metadata.reason,
+        requestedFocusId: id,
+        routeId: metadata.routeId ?? node.routeId
+      });
+      this.notify(previous);
+      return {
+        current: this.currentFocus,
+        nativeFocusApplied,
+        previous: this.currentFocus
+      };
     }
 
     const previousNode = previous ? this.nodes.get(previous) : undefined;
@@ -579,11 +1048,57 @@ export class FocusManager {
     if (metadata.remember !== false && node.routeId) {
       this.rememberRouteFocus(node.routeId, id);
     }
-    this.focusNodeIfAllowed(id);
-    const transition = this.publishTransition(previous ?? null, id, metadata, previousRouteOverride ?? previousNode?.routeId ?? null);
+    this.publishReconciliationEvent('focus-requested', {
+      direction: metadata.direction,
+      focusId: id,
+      inputKey: metadata.inputKey,
+      pendingFocusId: this.pendingDirectionalFocus?.targetId,
+      pendingToken: this.pendingDirectionalFocus?.token,
+      reason: metadata.reason,
+      requestedFocusId: id,
+      routeId: metadata.routeId ?? node.routeId,
+      targetMounted: true
+    });
+    const nativeFocusApplied = this.focusNodeIfAllowed(id, {
+      direction: metadata.direction,
+      focusId: id,
+      inputKey: metadata.inputKey,
+      pendingFocusId: this.pendingDirectionalFocus?.targetId,
+      pendingToken: this.pendingDirectionalFocus?.token,
+      reason: metadata.reason,
+      requestedFocusId: id,
+      routeId: metadata.routeId ?? node.routeId
+    });
+    const transition = nativeFocusApplied
+      ? this.publishTransition(
+        previous ?? null,
+        id,
+        metadata,
+        previousRouteOverride ?? previousNode?.routeId ?? null
+      )
+      : undefined;
     this.notify(previous ?? null);
 
-    return { current: this.currentFocus, previous: previous ?? null, transition };
+    if (!nativeFocusApplied) {
+      this.publishReconciliationEvent('reconciliation-violation', {
+        direction: metadata.direction,
+        focusId: id,
+        inputKey: metadata.inputKey,
+        nativeFocusApplied: false,
+        reason: metadata.reason,
+        reconciliationViolation: true,
+        requestedFocusId: id,
+        routeId: metadata.routeId ?? node.routeId,
+        targetMounted: true
+      });
+    }
+
+    return {
+      current: this.currentFocus,
+      nativeFocusApplied,
+      previous: previous ?? null,
+      transition
+    };
   }
 
   private moveFromMissingFocus(direction: PtvFocusDirection, metadata: FocusMoveMetadata): FocusNavigationResult {
@@ -605,6 +1120,14 @@ export class FocusManager {
     const wasCurrent = this.currentFocus;
     this.currentFocus = null;
     if (nextFocus) {
+      this.publishReconciliationEvent('fallback-applied', {
+        fallbackReason: 'logical-focus-missing-from-registry',
+        focusId: nextFocus,
+        reason: 'unregister-fallback',
+        requestedFocusId: previous,
+        routeId: this.activeRouteId,
+        targetMounted: true
+      });
       this.applyFocus(nextFocus, {
         reason: 'unregister-fallback',
         routeId: this.activeRouteId,
@@ -650,7 +1173,56 @@ export class FocusManager {
     return false;
   }
 
+  private tryPendingDirectionalFocus(node: FocusNodeRegistration) {
+    const pending = this.pendingDirectionalFocus;
+    if (!pending || pending.targetId !== node.id || !this.nodeMatchesRoute(node, pending.routeId)) {
+      return false;
+    }
+    if (!this.isInteractive(node)) return false;
+
+    const previous = this.currentFocus;
+    this.pendingDirectionalFocus = null;
+    this.directionalReservation = {
+      direction: pending.direction,
+      inputKey: pending.inputKey,
+      routeId: pending.routeId,
+      settled: false,
+      targetId: pending.targetId
+    };
+    const result = this.applyFocus(node.id, {
+      direction: pending.direction,
+      fallbackUsed: false,
+      inputKey: pending.inputKey,
+      reason: 'directional',
+      routeId: pending.routeId
+    }, previous);
+    this.publishReconciliationEvent('pending-focus-restored', {
+      direction: pending.direction,
+      focusId: pending.targetId,
+      inputKey: pending.inputKey,
+      nativeFocusApplied: this.readNativeFocusId() === pending.targetId,
+      pendingFocusId: pending.targetId,
+      pendingToken: pending.token,
+      reason: 'directional',
+      requestedFocusId: pending.targetId,
+      routeId: pending.routeId,
+      targetMounted: true
+    });
+    return result.current === node.id;
+  }
+
+  private clearDirectionalFocusState() {
+    this.directionalReservation = null;
+    this.pendingDirectionalFocus = null;
+  }
+
   private isWaitingForAnotherNode(node: FocusNodeRegistration) {
+    const pendingDirectional = this.pendingDirectionalFocus;
+    if (
+      pendingDirectional
+      && this.nodeMatchesRoute(node, pendingDirectional.routeId)
+      && pendingDirectional.targetId !== node.id
+    ) return true;
     const pending = this.pendingRouteRestore;
     if (!pending || !this.nodeMatchesRoute(node, pending.routeId)) return false;
     const requestedId = pending.targetId ?? pending.fallbackFocusId;
@@ -711,12 +1283,84 @@ export class FocusManager {
     ));
   }
 
-  private focusNodeIfAllowed(id: string) {
-    if (this.pointerFocused) return;
+  private focusNodeIfAllowed(id: string, metadata: FocusReconciliationMetadata = {}) {
     const node = this.nodes.get(id);
-    if (!node || !this.isInteractive(node)) return;
-    if (typeof node.ref.focus !== 'function') return;
-    node.ref.focus({ preventScroll: true });
+    if (!node || !this.isInteractive(node) || typeof node.ref.focus !== 'function') {
+      this.publishReconciliationEvent('native-focus-failed', {
+        ...metadata,
+        focusId: id,
+        nativeFocusApplied: false,
+        requestedFocusId: metadata.requestedFocusId ?? id,
+        targetMounted: Boolean(node?.ref.isConnected)
+      });
+      return false;
+    }
+    try {
+      node.ref.focus({ preventScroll: true });
+    } catch {
+      this.publishReconciliationEvent('native-focus-failed', {
+        ...metadata,
+        focusId: id,
+        nativeFocusApplied: false,
+        requestedFocusId: metadata.requestedFocusId ?? id,
+        targetMounted: true
+      });
+      return false;
+    }
+    const nativeFocusApplied = node.ref.ownerDocument.activeElement === node.ref;
+    this.publishReconciliationEvent(
+      nativeFocusApplied ? 'native-focus-applied' : 'native-focus-failed',
+      {
+        ...metadata,
+        focusId: id,
+        nativeFocusApplied,
+        reconciliationViolation: !nativeFocusApplied,
+        requestedFocusId: metadata.requestedFocusId ?? id,
+        targetMounted: true
+      }
+    );
+    return nativeFocusApplied;
+  }
+
+  private readNativeFocusId() {
+    if (typeof document === 'undefined') return null;
+    const active = document.activeElement;
+    return active instanceof HTMLElement ? active.getAttribute('data-focus-id') : null;
+  }
+
+  private publishReconciliationEvent(
+    type: FocusReconciliationEventType,
+    metadata: FocusReconciliationMetadata = {}
+  ) {
+    if (this.reconciliationListeners.size === 0) return null;
+    const requestedFocusId = metadata.requestedFocusId ?? null;
+    const requestedNode = requestedFocusId ? this.nodes.get(requestedFocusId) : undefined;
+    const event: FocusReconciliationEvent = {
+      timestamp: Date.now(),
+      type,
+      routeId: normalizeRouteId(metadata.routeId) ?? this.activeRouteId,
+      focusId: metadata.focusId ?? null,
+      requestedFocusId,
+      registeredFocusId: metadata.registeredFocusId ?? null,
+      unregisteredFocusId: metadata.unregisteredFocusId ?? null,
+      logicalFocusId: this.currentFocus,
+      nativeFocusId: this.readNativeFocusId(),
+      pendingFocusId: metadata.pendingFocusId ?? this.pendingDirectionalFocus?.targetId ?? null,
+      inputKey: metadata.inputKey ?? null,
+      reason: metadata.reason ?? null,
+      direction: metadata.direction ?? null,
+      targetMounted: metadata.targetMounted ?? Boolean(requestedNode?.ref.isConnected),
+      interactionMode: this.interactionModeValue,
+      pendingToken: metadata.pendingToken ?? this.pendingDirectionalFocus?.token ?? null,
+      fallbackReason: metadata.fallbackReason ?? null,
+      nativeFocusApplied: metadata.nativeFocusApplied ?? null,
+      reconciliationViolation: metadata.reconciliationViolation ?? false,
+      renderWindowStart: metadata.renderWindowStart ?? this.currentRenderWindowStart
+    };
+    for (const listener of Array.from(this.reconciliationListeners)) {
+      listener(event);
+    }
+    return event;
   }
 
   private publishTransition(

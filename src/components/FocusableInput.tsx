@@ -18,8 +18,10 @@ export function FocusableInput({
   className,
   onClick,
   onFocus,
+  onMouseDown,
   onMouseEnter,
   onMouseLeave,
+  onMouseMove,
   disabled,
   ...props
 }: FocusableInputProps) {
@@ -54,21 +56,45 @@ export function FocusableInput({
       data-focus-route={routeId}
       className={`ptv-focusable ${isActive ? 'is-focused' : ''} ${className ?? ''}`.trim()}
       onClick={event => {
-        manager.focus(focusId, { reason: 'pointer', inputKey: 'click', routeId });
+        if (event.detail > 0) {
+          manager.recordPointerMovement(event.clientX, event.clientY, event.timeStamp);
+          manager.claimPointerInteraction();
+        }
+        if (manager.interactionMode === 'pointer') {
+          manager.focusFromPointer(focusId, { inputKey: 'click', routeId });
+        } else {
+          manager.focus(focusId, { reason: 'direct', inputKey: 'click', routeId });
+        }
         onClick?.(event);
       }}
       onFocus={event => {
-        manager.focus(focusId, { reason: 'dom-focus', routeId });
+        manager.handleDomFocus(focusId, { reason: 'dom-focus', routeId });
         onFocus?.(event);
       }}
+      onMouseDown={event => {
+        manager.recordPointerMovement(event.clientX, event.clientY, event.timeStamp);
+        manager.claimPointerInteraction();
+        manager.focusFromPointer(focusId, { inputKey: 'pointer-down', routeId });
+        onMouseDown?.(event);
+      }}
       onMouseEnter={event => {
-        manager.setPointerFocusActive(true);
-        manager.focus(focusId, { reason: 'pointer', inputKey: 'pointer', routeId });
         onMouseEnter?.(event);
       }}
       onMouseLeave={event => {
-        manager.setPointerFocusActive(false);
         onMouseLeave?.(event);
+      }}
+      onMouseMove={event => {
+        const pointerMoved = manager.recordPointerMovement(
+          event.clientX,
+          event.clientY,
+          event.timeStamp
+        );
+        // Hovering a text input must not open LG's virtual keyboard. A real
+        // mouse-down/click below still gives the input native focus.
+        if (pointerMoved && document.activeElement === event.currentTarget) {
+          manager.focusFromPointer(focusId, { inputKey: 'pointer-move', routeId });
+        }
+        onMouseMove?.(event);
       }}
       tabIndex={-1}
     />

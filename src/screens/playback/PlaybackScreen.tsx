@@ -97,6 +97,10 @@ const emptySnapshot: PlaybackDiagnosticsSnapshot = {
   }
 };
 
+const NETWORK_MEDIA_ERROR_CODE = 2;
+const MAX_NETWORK_PLAYBACK_RETRIES = 2;
+const NETWORK_RETRY_DELAYS_MS = [750, 2_000] as const;
+
 function episodeContext(item: { seriesName?: string | null; seasonName?: string | null; parentIndexNumber?: number | null; indexNumber?: number | null }) {
   const number = item.parentIndexNumber && item.indexNumber
     ? `S${item.parentIndexNumber} E${item.indexNumber}`
@@ -231,6 +235,11 @@ function isDemuxerParseError(message: string) {
   return /DEMUXER_ERROR_COULD_NOT_PARSE/i.test(message);
 }
 
+function isNetworkPlaybackError(message: string, mediaErrorCode?: number | null) {
+  return mediaErrorCode === NETWORK_MEDIA_ERROR_CODE
+    || /network|connection|failed to fetch|load failed|request timeout|server.*unreachable/i.test(message);
+}
+
 function formatEpisodeHeaderTitle(intent: PtvPlaybackIntent | null, title: string) {
   if (!intent || !intent.context) return title;
 
@@ -286,6 +295,7 @@ function playbackIntentAtQueueIndex(
   return {
     kind: intent.kind,
     itemId: track.itemId,
+    seriesId: track.seriesId ?? intent.seriesId,
     serverId: intent.serverId,
     userId: intent.userId,
     title: track.title || intent.title,
@@ -313,6 +323,8 @@ export function PlaybackScreen() {
   const autoAdvanceControllerRef = useRef<AbortController | null>(null);
   const autoAdvanceStartedForItemRef = useRef<string | null>(null);
   const demuxerParseRetryByItemRef = useRef<Set<string>>(new Set());
+  const networkRetryCountByItemRef = useRef<Map<string, number>>(new Map());
+  const networkRetryTimerRef = useRef<number | null>(null);
 
   const [playerState, setPlayerState] = useState<PlaybackEngineState>('idle');
   const [endedItemId, setEndedItemId] = useState<string | null>(null);
@@ -370,6 +382,33 @@ export function PlaybackScreen() {
   const shouldShowPlaybackContext = Boolean(playbackContext);
   playerStateRef.current = playerState;
 
+  const retryNetworkPlayback = useCallback((itemId: string, positionSeconds: number) => {
+    const previousRetryCount = networkRetryCountByItemRef.current.get(itemId) ?? 0;
+    if (previousRetryCount >= MAX_NETWORK_PLAYBACK_RETRIES || networkRetryTimerRef.current !== null) {
+      return false;
+    }
+
+    networkRetryCountByItemRef.current.set(itemId, previousRetryCount + 1);
+    setError(`Connection interrupted. Retrying playback (${previousRetryCount + 1}/${MAX_NETWORK_PLAYBACK_RETRIES})…`);
+    const delayMs = NETWORK_RETRY_DELAYS_MS[previousRetryCount]
+      ?? NETWORK_RETRY_DELAYS_MS[NETWORK_RETRY_DELAYS_MS.length - 1]
+      ?? 2_000;
+    networkRetryTimerRef.current = window.setTimeout(() => {
+      networkRetryTimerRef.current = null;
+      const engine = engineRef.current;
+      if (!engine || runtimeRef.current?.itemId !== itemId) return;
+      void (async () => {
+        await engine.stop('superseded');
+        if (runtimeRef.current?.itemId !== itemId) return;
+        await engine.start({
+          itemId,
+          startPositionSeconds: Math.max(0, positionSeconds)
+        }).catch(() => {});
+      })();
+    }, delayMs);
+    return true;
+  }, []);
+
   if (intent && userSession && state.serverUrl) {
     runtimeRef.current = {
       client: services.jellyfin.configureSession(state.serverUrl, userSession.accessToken),
@@ -410,12 +449,22 @@ export function PlaybackScreen() {
             }
             setPlayerState(next);
             setEndedItemId(next === 'ended' ? runtimeRef.current?.itemId ?? null : null);
+            if (next === 'playing') setError(null);
           }
         },
         onError: message => {
           const normalizedMessage = normalizePlaybackErrorMessage(message);
           const currentItemId = runtimeRef.current?.itemId;
           const isDemuxerParse = isDemuxerParseError(normalizedMessage);
+          const engineSnapshot = engineRef.current?.getDiagnosticsSnapshot();
+
+          if (
+            currentItemId
+            && isNetworkPlaybackError(normalizedMessage, engineSnapshot?.lastMediaErrorCode)
+            && retryNetworkPlayback(currentItemId, engineSnapshot?.currentTime ?? 0)
+          ) {
+            return;
+          }
 
           if (isDemuxerParse && currentItemId && !demuxerParseRetryByItemRef.current.has(currentItemId)) {
             demuxerParseRetryByItemRef.current.add(currentItemId);
@@ -774,6 +823,11 @@ export function PlaybackScreen() {
     if (!engine || !video || !intent || !userSession) return;
     setError(null);
     demuxerParseRetryByItemRef.current.delete(intent.itemId);
+    networkRetryCountByItemRef.current.delete(intent.itemId);
+    if (networkRetryTimerRef.current !== null) {
+      window.clearTimeout(networkRetryTimerRef.current);
+      networkRetryTimerRef.current = null;
+    }
     setAutoAdvancePending(false);
     setControlsVisible(true);
     engine.attach(video);
@@ -791,6 +845,14 @@ export function PlaybackScreen() {
             : 'Playback failed';
         const normalizedMessage = normalizePlaybackErrorMessage(String(message));
         const currentItemId = runtimeRef.current?.itemId;
+        const engineSnapshot = engine.getDiagnosticsSnapshot();
+        if (
+          currentItemId
+          && isNetworkPlaybackError(normalizedMessage, engineSnapshot.lastMediaErrorCode)
+          && retryNetworkPlayback(currentItemId, engineSnapshot.currentTime)
+        ) {
+          return;
+        }
         if (
           isDemuxerParseError(normalizedMessage) &&
           currentItemId &&
@@ -812,9 +874,13 @@ export function PlaybackScreen() {
 
     return () => {
       clearHideControlsTimer();
+      if (networkRetryTimerRef.current !== null) {
+        window.clearTimeout(networkRetryTimerRef.current);
+        networkRetryTimerRef.current = null;
+      }
       engine.detach();
     };
-  }, [clearHideControlsTimer, intent, userSession]);
+  }, [clearHideControlsTimer, intent, retryNetworkPlayback, userSession]);
 
   useLayoutEffect(() => {
     const engine = engineRef.current;
@@ -849,13 +915,18 @@ export function PlaybackScreen() {
           runtimeRef.current?.itemId !== completedItemId
         ) return;
 
+        const queuedNextIntent = intent.queue && canGoNext
+          ? playbackIntentAtQueueIndex(intent, queueItemsWithTracks, activeQueueIndex + 1)
+          : null;
         const runtime = runtimeRef.current;
-        const response = await runtime.client.getNextUpForSeries(
-          runtime.userId,
-          seriesId,
-          2,
-          controller.signal
-        );
+        const response = queuedNextIntent
+          ? null
+          : await runtime.client.getNextUpForSeries(
+            runtime.userId,
+            seriesId,
+            2,
+            controller.signal
+          );
         if (
           !active ||
           controller.signal.aborted ||
@@ -863,14 +934,12 @@ export function PlaybackScreen() {
           runtimeRef.current?.itemId !== completedItemId
         ) return;
 
-        const nextEpisode = mapPtvItems(response).find(candidate => (
+        const nextEpisode = response ? mapPtvItems(response).find(candidate => (
           candidate.type === 'Episode' &&
           candidate.id !== completedItemId &&
           candidate.seriesId === seriesId
-        ));
-        if (!nextEpisode) return;
-
-        const nextIntent: PtvPlaybackIntent = {
+        )) : null;
+        const nextIntent: PtvPlaybackIntent | null = queuedNextIntent ?? (nextEpisode ? {
           kind: 'episode',
           itemId: nextEpisode.id,
           seriesId: nextEpisode.seriesId ?? seriesId,
@@ -880,7 +949,8 @@ export function PlaybackScreen() {
           context: episodeContext(nextEpisode),
           logoUrl: intent.logoUrl,
           startPositionTicks: nextEpisode.playbackPositionTicks
-        };
+        } : null);
+        if (!nextIntent) return;
         setAutoAdvancePending(false);
         dispatch({
           type: 'advance_playback',
@@ -910,10 +980,13 @@ export function PlaybackScreen() {
     };
   }, [
     dispatch,
+    activeQueueIndex,
+    canGoNext,
     endedItemId,
     intent,
     services.diagnostics,
     playbackRouteMode,
+    queueItemsWithTracks,
     state.route.screen,
     state.settings.autoPlayNext,
     userSession

@@ -16,6 +16,16 @@ export interface CachedBrowsePage {
   totalRecordCount?: number;
 }
 
+export interface CachedBrowseWindow {
+  screen: MediaBrowseScreen;
+  filter: MediaBrowseFilter;
+  items: PtvItem[];
+  nextStartIndex: number;
+  totalRecordCount?: number;
+  hasMore: boolean;
+  focusedItemId?: string;
+}
+
 export interface RememberedBrowseLocation {
   filter: MediaBrowseFilter;
   page: number;
@@ -43,6 +53,7 @@ interface MediaCacheEntry {
   metadata: Map<string, TimedValue<PtvItem>>;
   series: Map<string, SeriesCacheEntry>;
   browsePages: Map<string, TimedValue<CachedBrowsePage>>;
+  browseWindows: Map<string, TimedValue<CachedBrowseWindow>>;
   browseLocations: Map<MediaBrowseScreen, RememberedBrowseLocation>;
   search?: CachedSearchSnapshot;
 }
@@ -74,6 +85,7 @@ function createEntry(sessionKey: string): MediaCacheEntry {
     metadata: new Map(),
     series: new Map(),
     browsePages: new Map(),
+    browseWindows: new Map(),
     browseLocations: new Map()
   };
 }
@@ -106,6 +118,10 @@ function isValidPage(page: number) {
 
 function browsePageKey(screen: MediaBrowseScreen, filter: MediaBrowseFilter, page: number) {
   return `${screen}\u0000${filter}\u0000${page}`;
+}
+
+function browseWindowKey(screen: MediaBrowseScreen, filter: MediaBrowseFilter) {
+  return `${screen}\u0000${filter}`;
 }
 
 export function createMediaCacheSessionKey(
@@ -253,6 +269,46 @@ export function readBrowsePage(
   if (!entry || !isValidPage(page)) return undefined;
   const key = browsePageKey(screen, filter, page);
   return readTimedValue(entry.browsePages.get(key), now, () => entry.browsePages.delete(key));
+}
+
+export function writeBrowseWindow(
+  sessionKey: string,
+  window: CachedBrowseWindow,
+  now = Date.now()
+) {
+  const entry = getEntry(sessionKey, true);
+  if (!entry || !isValidPage(window.nextStartIndex)) return false;
+  const key = browseWindowKey(window.screen, window.filter);
+  entry.browseWindows.set(key, {
+    expiresAt: now + MEDIA_CACHE_TTL_MS,
+    value: cloneValue(window)
+  });
+  return true;
+}
+
+export function readBrowseWindow(
+  sessionKey: string | null,
+  screen: MediaBrowseScreen,
+  filter: MediaBrowseFilter,
+  now = Date.now()
+) {
+  const entry = getEntry(sessionKey);
+  if (!entry) return undefined;
+  const key = browseWindowKey(screen, filter);
+  return readTimedValue(entry.browseWindows.get(key), now, () => entry.browseWindows.delete(key));
+}
+
+export function clearBrowseWindows(
+  sessionKey: string | null,
+  screen: MediaBrowseScreen
+) {
+  const entry = getEntry(sessionKey);
+  if (!entry) return false;
+  const prefix = `${screen}\u0000`;
+  for (const key of Array.from(entry.browseWindows.keys())) {
+    if (key.startsWith(prefix)) entry.browseWindows.delete(key);
+  }
+  return true;
 }
 
 export function rememberBrowseLocation(

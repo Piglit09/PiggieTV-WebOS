@@ -106,7 +106,8 @@ function buildPages(snapshot: PtvDiagnosticsSnapshot, recentLogs: unknown[]): Di
         lastNavigationEvent: snapshot.lastNavigationEvent,
         recentNavigationEvents: snapshot.recentNavigationEvents,
         lastRouteFocusRestore: snapshot.lastRouteFocusRestore,
-        recentFocusTransitions: snapshot.recentFocusTransitions
+        recentFocusTransitions: snapshot.recentFocusTransitions,
+        focusReconciliation: snapshot.focusReconciliation
       }
     },
     {
@@ -116,6 +117,8 @@ function buildPages(snapshot: PtvDiagnosticsSnapshot, recentLogs: unknown[]): Di
       content: {
         lastLifecycleEvent: snapshot.lastLifecycleEvent,
         recentLifecycleEvents: snapshot.recentLifecycleEvents,
+        runtimeLifecycle: snapshot.runtimeLifecycle,
+        showsLibrary: snapshot.showsLibrary,
         lastUiError: snapshot.lastUiError,
         lastPlaybackError: snapshot.lastPlaybackError,
         recentLogs: recentLogs.slice(-20)

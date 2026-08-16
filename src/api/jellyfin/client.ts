@@ -46,7 +46,58 @@ export interface PtvQuickConnectStateResponse {
 
 type RequestExtras = Omit<Partial<RequestConfig>, 'method' | 'body' | 'timeoutMs' | 'signal'>;
 
-const EPISODE_FIELDS = 'ImageTags,Overview,RunTimeTicks,SeriesName,SeasonName,IndexNumber,ParentIndexNumber,UserData,SeriesId,SeasonId,ParentId';
+const EPISODE_FIELDS = 'Overview,ParentId';
+const JELLYFIN_ITEM_FIELDS = new Set([
+  'AirTime',
+  'CanDelete',
+  'CanDownload',
+  'ChannelInfo',
+  'Chapters',
+  'Trickplay',
+  'ChildCount',
+  'CumulativeRunTimeTicks',
+  'CustomRating',
+  'DateCreated',
+  'DateLastMediaAdded',
+  'DisplayPreferencesId',
+  'Etag',
+  'ExternalUrls',
+  'Genres',
+  'ItemCounts',
+  'MediaSourceCount',
+  'MediaSources',
+  'OriginalTitle',
+  'Overview',
+  'ParentId',
+  'Path',
+  'People',
+  'PlayAccess',
+  'ProductionLocations',
+  'ProviderIds',
+  'PrimaryImageAspectRatio',
+  'RecursiveItemCount',
+  'Settings',
+  'SeriesStudio',
+  'SortName',
+  'SpecialEpisodeNumbers',
+  'Studios',
+  'Taglines',
+  'Tags',
+  'RemoteTrailers',
+  'MediaStreams',
+  'SeasonUserData',
+  'DateLastRefreshed',
+  'DateLastSaved',
+  'RefreshState',
+  'ChannelImage',
+  'EnableMediaSourceDisplay',
+  'Width',
+  'Height',
+  'ExtraIds',
+  'LocalTrailerCount',
+  'IsHD',
+  'SpecialFeatureCount'
+]);
 const SEARCH_TAXONOMY_TIMEOUT_MS = 2_500;
 const SEARCH_TAXONOMY_EXACT_TIMEOUT_MS = 6_000;
 const SEARCH_CATEGORY_TIMEOUT_MS = 8_000;
@@ -54,6 +105,7 @@ const SEARCH_RESPONSE_CACHE_TTL_MS = 60_000;
 const SEARCH_TIMEOUT_CACHE_TTL_MS = 15_000;
 const SEARCH_RESPONSE_CACHE_LIMIT = 64;
 const PLAYBACK_REPORT_TIMEOUT_MS = 8_000;
+const PLAYBACK_PROGRESS_RETRY_DELAY_MS = 250;
 
 type PlaybackReportPath =
   | 'Sessions/Playing'
@@ -82,6 +134,25 @@ function getRequestErrorDetails(cause: unknown) {
     kind: typeof candidate.kind === 'string' ? candidate.kind : '',
     code
   };
+}
+
+export function sanitizeItemFields(fields: string | undefined) {
+  if (!fields) return undefined;
+  const sanitized = fields
+    .split(',')
+    .map(field => field.trim())
+    .filter(field => JELLYFIN_ITEM_FIELDS.has(field));
+  return sanitized.length > 0 ? [...new Set(sanitized)].join(',') : undefined;
+}
+
+function sanitizeItemFieldQuery(
+  query?: Record<string, string | number | boolean | undefined>
+) {
+  if (!query || typeof query.Fields !== 'string') return query;
+  const sanitizedFields = sanitizeItemFields(query.Fields);
+  const sanitizedQuery = { ...query };
+  delete sanitizedQuery.Fields;
+  return sanitizedFields ? { ...sanitizedQuery, Fields: sanitizedFields } : sanitizedQuery;
 }
 
 function normalizeEpisodeRelationships(
@@ -227,7 +298,7 @@ export class JellyfinApiClient {
       ...requestConfig,
       method: 'GET',
       headers: this.headers,
-      query,
+      query: sanitizeItemFieldQuery(query),
       timeoutMs,
       signal,
       requestTracker: requestConfig.requestTracker ?? this.requestTracker,
@@ -258,17 +329,32 @@ export class JellyfinApiClient {
   }
 
   private async sendReport<T>(path: PlaybackReportPath, body: unknown) {
-    return this.post<T>(
-      path,
-      body,
-      PLAYBACK_REPORT_TIMEOUT_MS,
-      undefined,
-      'playback',
-      {
-        retries: 0,
-        requestRoute: `POST ${path}`
-      }
-    );
+    const send = () => this.post<T>(
+        path,
+        body,
+        PLAYBACK_REPORT_TIMEOUT_MS,
+        undefined,
+        'playback',
+        {
+          retries: 0,
+          requestRoute: `POST ${path}`
+        }
+      );
+    try {
+      return await send();
+    } catch (cause) {
+      const details = getRequestErrorDetails(cause);
+      const retryableProgressFailure = path === 'Sessions/Playing/Progress'
+        && (
+          details.kind === 'server-error'
+          || details.kind === 'server-unreachable'
+          || details.kind === 'network-unavailable'
+          || details.kind === 'request-timeout'
+        );
+      if (!retryableProgressFailure) throw cause;
+      await new Promise(resolve => window.setTimeout(resolve, PLAYBACK_PROGRESS_RETRY_DELAY_MS));
+      return send();
+    }
   }
 
   public async validateServer(timeoutMs = 10000, requestConfig: RequestExtras = {}, signal?: AbortSignal): Promise<PtvSystemInfo> {
@@ -541,6 +627,68 @@ export class JellyfinApiClient {
       { requestRoute: 'GET Users/{user}/Items (season episode fallback)' }
     );
     return normalizeEpisodeRelationships(fallbackResponse, seriesId, seasonId);
+  }
+
+  public async getSeriesEpisodes(
+    sessionUserId: string,
+    seriesId: string,
+    signal?: AbortSignal
+  ) {
+    let primaryResponse: { Items: Array<Record<string, unknown>>; TotalRecordCount?: number } | null = null;
+    try {
+      primaryResponse = await this.get<{ Items: Array<Record<string, unknown>>; TotalRecordCount?: number }>(
+        `Shows/${encodeURIComponent(seriesId)}/Episodes`,
+        {
+          UserId: sessionUserId,
+          Fields: EPISODE_FIELDS,
+          EnableUserData: true,
+          EnableTotalRecordCount: false
+        },
+        undefined,
+        signal,
+        { requestRoute: 'GET Shows/{series}/Episodes' }
+      );
+    } catch (cause) {
+      if (signal?.aborted) throw cause;
+    }
+
+    if (primaryResponse && Array.isArray(primaryResponse.Items) && primaryResponse.Items.length > 0) {
+      return {
+        ...primaryResponse,
+        Items: primaryResponse.Items.map(item => ({
+          ...item,
+          SeriesId: typeof item.SeriesId === 'string' && item.SeriesId.trim()
+            ? item.SeriesId.trim()
+            : seriesId
+        }))
+      };
+    }
+
+    const fallbackResponse = await this.get<{ Items: Array<Record<string, unknown>>; TotalRecordCount?: number }>(
+      `Users/${encodeURIComponent(sessionUserId)}/Items`,
+      {
+        ParentId: seriesId,
+        IncludeItemTypes: 'Episode',
+        Recursive: true,
+        Fields: EPISODE_FIELDS,
+        EnableUserData: true,
+        EnableTotalRecordCount: false,
+        SortBy: 'SortName',
+        SortOrder: 'Ascending'
+      },
+      undefined,
+      signal,
+      { requestRoute: 'GET Users/{user}/Items series episodes' }
+    );
+    return {
+      ...fallbackResponse,
+      Items: (Array.isArray(fallbackResponse.Items) ? fallbackResponse.Items : []).map(item => ({
+        ...item,
+        SeriesId: typeof item.SeriesId === 'string' && item.SeriesId.trim()
+          ? item.SeriesId.trim()
+          : seriesId
+      }))
+    };
   }
 
   public getRecentlyAdded(sessionUserId: string, includeType: string, limit = 16, signal?: AbortSignal) {

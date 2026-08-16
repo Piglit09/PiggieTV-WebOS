@@ -112,6 +112,7 @@ export interface PtvMediaSource {
 export interface PtvPlaybackQueueItem {
   itemId: string;
   title: string;
+  seriesId?: string;
   startPositionTicks?: number;
   context?: string;
   artist?: string;
@@ -311,7 +312,16 @@ export interface PtvDiagnosticsSnapshot {
   recentLifecycleEvents?: Array<Record<string, unknown>>;
   lastRouteFocusRestore?: Record<string, unknown> | null;
   recentFocusTransitions?: Array<Record<string, unknown>>;
+  focusReconciliation?: {
+    current: Record<string, unknown> | null;
+    recentEvents: Array<Record<string, unknown>>;
+  };
   homePerformance?: import('../core/homePerformance').HomePerformanceSnapshot;
+  runtimeLifecycle?: import('../core/runtimeDiagnostics').RuntimeHealthSnapshot;
+  showsLibrary?: {
+    current: Record<string, unknown> | null;
+    recentEvents: Array<Record<string, unknown>>;
+  };
 }
 
 export interface PtvRoute {

@@ -1,6 +1,22 @@
 # webOS Testing
 
-## Phase 1 target matrix
+## Three-tier validation matrix
+
+LG lists the webOS CLI, webOS Studio, and webOS TV Simulator as separate SDK tools. It also marks the old Emulator as deprecated and provides the Simulator for webOS TV 22 and later. See LG's [SDK Introduction](https://webostv.developer.lge.com/develop/tools/sdk-introduction), [Simulator Developer Guide](https://webostv.developer.lge.com/develop/tools/simulator-dev-guide), and [webOS CLI Developer Guide](https://webostv.developer.lge.com/develop/tools/cli-dev-guide).
+
+| Tier | Environment and repeatable entry point | What it can prove | Release authority |
+| --- | --- | --- | --- |
+| Tier 1: automated/browser | Vitest/jsdom, production build/package inspection, and targeted rendered-browser checks | Pure logic, request sequencing, focus contracts, incremental loading/windowing invariants, legacy-bundle production output, and desktop rendered regressions | Required first gate; cannot certify webOS or television hardware |
+| Tier 2: official Simulator | LG webOS TV 26 Simulator 1.5.0 on Windows, driven by webOS CLI 3.2.5 with an unpacked candidate app directory | Simulator WebView startup, 1920x1080 layout, CDP DPAD/focus traversal, a virtual-RCU delivery probe, bounded library diagnostics, console/runtime failures, and repeatable screenshot evidence | Required platform smoke/stress gate when available; cannot clear a physical-TV hold |
+| Tier 3: physical LG | Exact candidate IPK on LG 70UN7070PUA, using its Magic Remote/DPAD and live Jellyfin service | Real webOS lifecycle, hardware input, memory/latency, decoder and media behavior, TLS/network conditions, overscan, long-run stability, and end-to-end exit/back behavior | Final hardware acceptance authority |
+
+The tiers accumulate evidence; they do not substitute for one another. A Tier 2 pass promotes confidence and can catch platform-specific regressions earlier, but it must never be reported as a Tier 3 pass.
+
+### Current Shows-library hold
+
+The v0.1.8 Shows-library candidate remains on **physical-TV HOLD**. Tier 2 evidence may confirm launch, DPAD behavior, incremental loading, render-window bounds, artwork concurrency, filter resets, Details/Back focus restoration, and long traversal in the Simulator. Only a Tier 3 run of the exact candidate IPK can clear the hold. The Simulator must not change the physical checklist status or be used to certify hardware memory, decoder, lifecycle, or real-remote behavior.
+
+## Physical-TV target baseline
 
 | Item | Acceptance target |
 | --- | --- |
@@ -10,14 +26,14 @@
 | Jellyfin URL | `https://piggietv.com` |
 | Jellyfin version | 10.11.11 reported baseline; record the live version at test time |
 | Application ID | `com.piggietv.webosnative` |
-| Application version | `0.1.0` |
-| Package | `dist/pkgs/com.piggietv.webosnative_0.1.0_all.ipk` |
+| Application version | Record the exact candidate version from `appinfo.json` |
+| Package | Record the exact `dist/pkgs/com.piggietv.webosnative_<version>_all.ipk` filename and checksum |
 | Configured TV alias | `PiggieTV-LG` |
 | Configured TV endpoint | `10.16.0.231:9922` |
 
 ## Evidence policy and current hardware status
 
-Automated tests, a production build, and package inspection are software evidence. They do not prove behavior on an LG television. Emulator and desktop/jsdom runs also cannot certify the hardware decoder, media-format support, real Magic Remote event behavior, webOS application exit, TLS/network conditions, overscan, or on-device performance.
+Automated tests, a production build, and package inspection are Tier 1 software evidence. Simulator and desktop/jsdom runs also cannot certify the hardware decoder, media-format support, real Magic Remote event behavior, physical webOS application exit, TLS/network conditions, overscan, or on-device performance.
 
 Record physical-TV execution in the acceptance report for the exact candidate IPK. Every unchecked item in the manual checklist below remains unexecuted until a tester runs it on the named LG model and records the result. Do not convert an automated pass into a checked hardware item.
 
@@ -81,16 +97,90 @@ Keep local captures under the ignored repository roots `evidence/`, `artifacts/`
 
 The inspector's Network and Storage panels can reveal request bodies, authorization headers, persisted access tokens, and Quick Connect secrets. Treat the inspector URL and all captured output as private test evidence. Never attach an unreviewed inspector export or broad device log to an issue.
 
-## Emulator smoke test
+## Tier 2: official webOS TV Simulator workflow
 
-Use the standard emulator flow for the installed SDK:
+The verified local Tier 2 baseline is **webOS TV 26 Simulator 1.5.0** with **webOS CLI 3.2.5**. LG's current SDK guidance deprecates the older Emulator and treats Simulator as a separate desktop test tool. Do not use the configured CLI alias named `emulator`; it is an SSH target for the old Emulator model and is not the TV 26 Simulator.
 
-- open the emulator
-- install the generated `dist/pkgs/*.ipk`
-- launch PiggieTV
-- smoke-test startup, route transitions, DPAD navigation, Enter, Back, and diagnostics
+### Launch contract
 
-An emulator pass may catch packaging and layout regressions. It does not complete any physical-TV checkbox below.
+Simulator launch consumes the unpacked web-app root containing `appinfo.json` and `index.html`. It does not consume or install an IPK. The official CLI form verified for this environment is:
+
+```powershell
+$simDir = 'C:\path\to\webOS_TV_26_Simulator_1.5.0'
+$appDir = 'C:\path\to\exact-candidate\dist\.ptv-webos-package'
+ares-launch -s 26 -sp $simDir $appDir
+```
+
+This is the LG-documented `ares-launch --simulator` path. Use a permanently extracted Simulator directory, not a temporary archive-viewer extraction. Record the Simulator version, CLI version, absolute candidate app directory, its `appinfo.json` version, the corresponding IPK filename/checksum, and the source revision in the evidence record.
+
+The repeatable repository wrapper uses explicit Simulator inputs and rejects physical-device routing:
+
+```powershell
+$runStamp = Get-Date -Format 'yyyyMMddTHHmmss'
+$artifactDir = "artifacts\webos-simulator\$runStamp"
+npm run validate:webos:simulator -- `
+  --simulator-version 26 `
+  --simulator-path $simDir `
+  --no-prepare `
+  --app-dir $appDir `
+  --artifact-dir $artifactDir `
+  --auth-wait-minutes 10 `
+  --max-rows 150 `
+  --endurance-minutes 30 `
+  --lifecycle-cycle
+```
+
+Omit `--no-prepare` and `--app-dir` only when the wrapper should prepare a fresh candidate app directory itself. An existing exact staging directory must use `--no-prepare --app-dir`. Use `--auth-wait-minutes <1-30>` only when the Simulator does not restore its authorized Jellyfin session: sign in interactively inside the runner-owned window and leave that window open, and the runner will continue after it observes an authenticated app route. Credentials must never be passed in the command, environment, or artifacts. Without this option, an unauthenticated route remains an immediate authenticated-library HOLD.
+
+The wrapper always uses its localhost-only CDP diagnostic launch; use the raw `ares-launch -s` command above for the ordinary LG launch path. `--lifecycle-cycle` asks the runner to close and relaunch only its own process tree and verify that the localhost debugging port closes. `--keep-open` is an opt-in debugging convenience and must not be used for an unattended gate. The wrapper must never read or accept `--device`, `PTV_WEBOS_TEST_DEVICE`, `PiggieTV-LG`, or another device default.
+
+The Simulator is not an installed device target. Do not run `ares-install`, `ares-setup-device`, `npm run webos:install`, `npm run webos:health`, `npm run webos:logs`, or device-alias lifecycle commands against it. The ordinary LG flow launches a directory with `ares-launch -s`; the Simulator's own File/RCU controls close the app. The validation runner may stop only the exact Simulator process that it started and recorded. It must not terminate a pre-existing Simulator window.
+
+### Diagnostic automation boundary
+
+LG automatically provides the Simulator's Web Inspector. The repeatable stress workflow additionally has a custom diagnostic mode that starts the exact Simulator executable with Chromium remote debugging bound to `127.0.0.1` only. This CDP path is a PiggieTV test harness, not a documented LG device API and not release evidence by itself.
+
+- Accept only `http://127.0.0.1:<port>` discovery and `ws://127.0.0.1:<port>/...` or equivalent `localhost` loopback targets. Reject `0.0.0.0`, LAN addresses, credentials in URLs, TLS-remapped endpoints, missing ports, and unexpected target types.
+- Select the PiggieTV page and the virtual RCU page explicitly. Never fall back to the Simulator shell, keyboard, overlay, or another page target.
+- Probe the Simulator's virtual-RCU control first. If its renderer does not deliver the input in diagnostic mode, record that result as `HOLD`; do not silently claim virtual-RCU coverage.
+- The automated stress fallback uses Chromium `Input.dispatchKeyEvent` on the PiggieTV target. These are trusted renderer input events, not DOM `click()` or synthetic JavaScript keyboard events, but they bypass the Simulator's virtual-RCU renderer and therefore cannot certify real RCU/remote delivery.
+- Use CDP on the PiggieTV page for frozen diagnostic snapshots, focused-element identity/fingerprint, console failures, page visibility, layout metrics, screenshots, and the explicitly reported DPAD fallback only. Do not mutate focus or invoke application navigation functions.
+- Sanitize every JSON/text artifact before writing it. Redact passwords, access tokens, Quick Connect material, authorization headers, token-bearing URLs, private media identifiers, and WebSocket target IDs. Keep exact local candidate/Simulator paths only in private local evidence; never capture browser storage, request bodies, or an unreviewed network trace.
+
+The runner suppresses screenshots on startup, server, sign-in, Quick Connect, or an unknown route because bitmap evidence cannot be safely redacted. Its metadata network record contains only filter class, `StartIndex`, `Limit`, sequence, timing, and duplicate-active status; it never retains request headers, response bodies, user IDs, or raw URLs.
+
+The debug endpoint must be closed with the runner-owned Simulator process. Never leave a remote-debugging listener reachable from the network.
+
+### Shows-library Simulator acceptance
+
+Run the candidate at a 1920x1080 app viewport using a test session that is already authorized to read the intended Jellyfin library. Do not put credentials or tokens in command-line arguments, environment files, screenshots, or artifacts. If authorization is unavailable, record the run as an unauthenticated launch/diagnostic smoke only; do not claim the library traversal passed.
+
+Exercise and record at least:
+
+- cold launch, Home, and navigation into Shows using the explicitly reported Simulator DPAD method
+- first render and first metadata request of 24 titles
+- prefetch before the focused row reaches empty space
+- repeated DPAD traversal through at least 50 rows, plus a complete 1,048-title traversal when the test library reports that total; record whether input came from the virtual RCU or direct app-target CDP
+- no more than 96 poster cards rendered at once and no more than six active artwork loads
+- exactly one focus owner, focus remaining inside the render window, no focus jump when a batch appends, and no duplicate metadata request for one offset/filter generation
+- repeated Down, Up, Left, Right, rapid Down, and rapid Up across many render-window boundaries
+- Details open and exact Back restoration near the beginning, 25%, 50%, 75%, and end after the source card has moved through the render window
+- Recently Added, A-Z, and Favorites resets, including stale-response rejection and correct focus ownership
+- final-row/end-state behavior: no request past the total and a stable `All 1,048 shows loaded` result when the live total is 1,048
+- substantial upward traversal after reaching the end, followed by downward traversal, to prove old render windows reconstruct correctly
+- eight 180px columns and zero long-title, grid, and body overflow at 1920x1080 using actual long Jellyfin titles plus English, Japanese, Unicode, and punctuation-heavy fixtures
+- at least 30 minutes of deep browsing, Details/Back, filter changes, and rapid/upward/downward DPAD activity
+- console errors/warnings, unhandled rejections, page reloads, page/WebView identity, focus latency, and bounded render/artwork metrics during the endurance interval
+
+The invariant classifier may report a check as **UNKNOWN** when the candidate diagnostic snapshot does not expose that evidence. Missing evidence is not a pass and must not be converted into a violation. Observed breaches use stable failure codes: `INITIAL_BATCH_LIMIT`, `RENDER_WINDOW_LIMIT`, `ARTWORK_CONCURRENCY_LIMIT`, `FOCUS_OUTSIDE_WINDOW`, `FOCUS_OWNER_COUNT`, and `DUPLICATE_METADATA_REQUEST`.
+
+### Simulator evidence and failure artifacts
+
+Store local output under the ignored path `artifacts/webos-simulator/<UTC timestamp>/`. Each run should retain a sanitized manifest containing the tool versions, candidate identity, command mode, start/end timestamps, test steps, per-check `PASS`/`FAIL`/`UNKNOWN`, and process ownership. Add bounded metric samples, redacted console failures, and screenshots for Home, Shows initial load, deep navigation, focused poster, long-title containment, a post-window transition, Details, Details-to-Back restoration, and the near-bottom/final loaded state when those states are reached.
+
+On failure, preserve the last safe diagnostic snapshot, the current/previous step, focus fingerprint and render-window metrics, bounded recent events, sanitized console errors, and a screenshot before stopping only the runner-owned process. A Simulator pass or failure updates Tier 2 evidence only. It does not check, clear, or waive any Tier 3 item below.
+
+Do not tune production constants to make a Simulator result look better. The 24-item batch size, 96-card DOM cap, and six-request artwork limit remain fixed unless separate physical-TV evidence supports a change. The Simulator is a desktop approximation and is not evidence of the physical television's Chromium/webOS compatibility, CPU/GPU behavior, memory pressure, image decoding, playback, or long-session stability.
 
 ## Physical-TV manual acceptance checklist
 

@@ -1,6 +1,6 @@
 import React from 'react';
-import { MediaBrowseScreen } from './MediaBrowseScreen';
+import { ShowsLibraryScreen } from './ShowsLibraryScreen';
 
 export function ShowsScreen() {
-  return <MediaBrowseScreen screenId="shows" />;
+  return <ShowsLibraryScreen />;
 }
