@@ -98,8 +98,11 @@ const emptySnapshot: PlaybackDiagnosticsSnapshot = {
 };
 
 const NETWORK_MEDIA_ERROR_CODE = 2;
+const DECODE_MEDIA_ERROR_CODE = 3;
 const MAX_NETWORK_PLAYBACK_RETRIES = 2;
 const NETWORK_RETRY_DELAYS_MS = [750, 2_000] as const;
+const MIN_PLAYBACK_STALL_RECOVERY_MS = 15_000;
+const RECENT_PLAYBACK_STALL_WINDOW_MS = 2 * 60 * 1_000;
 
 function episodeContext(item: { seriesName?: string | null; seasonName?: string | null; parentIndexNumber?: number | null; indexNumber?: number | null }) {
   const number = item.parentIndexNumber && item.indexNumber
@@ -235,9 +238,31 @@ function isDemuxerParseError(message: string) {
   return /DEMUXER_ERROR_COULD_NOT_PARSE/i.test(message);
 }
 
-function isNetworkPlaybackError(message: string, mediaErrorCode?: number | null) {
-  return mediaErrorCode === NETWORK_MEDIA_ERROR_CODE
-    || /network|connection|failed to fetch|load failed|request timeout|server.*unreachable/i.test(message);
+function hasRecentPlaybackStall(snapshot?: PlaybackDiagnosticsSnapshot | null) {
+  if (!snapshot || snapshot.lastMediaErrorCode !== DECODE_MEDIA_ERROR_CODE) return false;
+
+  const errorEvent = [...snapshot.mediaEventHistory]
+    .reverse()
+    .find(event => event.event === 'error');
+  if (!errorEvent) return false;
+
+  return [...snapshot.mediaEventHistory]
+    .reverse()
+    .some(event => (
+      (event.event === 'waiting' || event.event === 'stalled')
+      && errorEvent.timestamp >= event.timestamp
+      && errorEvent.timestamp - event.timestamp >= MIN_PLAYBACK_STALL_RECOVERY_MS
+      && errorEvent.timestamp - event.timestamp <= RECENT_PLAYBACK_STALL_WINDOW_MS
+    ));
+}
+
+function isNetworkPlaybackError(
+  message: string,
+  snapshot?: PlaybackDiagnosticsSnapshot | null
+) {
+  return snapshot?.lastMediaErrorCode === NETWORK_MEDIA_ERROR_CODE
+    || /network|connection|failed to fetch|load failed|request timeout|server.*unreachable/i.test(message)
+    || hasRecentPlaybackStall(snapshot);
 }
 
 function formatEpisodeHeaderTitle(intent: PtvPlaybackIntent | null, title: string) {
@@ -398,7 +423,9 @@ export function PlaybackScreen() {
       const engine = engineRef.current;
       if (!engine || runtimeRef.current?.itemId !== itemId) return;
       void (async () => {
-        await engine.stop('superseded');
+        // Media teardown is synchronous. Do not hold stream recovery behind a
+        // stalled telemetry request; the old attempt's reports remain queued.
+        void engine.stop('superseded');
         if (runtimeRef.current?.itemId !== itemId) return;
         await engine.start({
           itemId,
@@ -460,7 +487,7 @@ export function PlaybackScreen() {
 
           if (
             currentItemId
-            && isNetworkPlaybackError(normalizedMessage, engineSnapshot?.lastMediaErrorCode)
+            && isNetworkPlaybackError(normalizedMessage, engineSnapshot)
             && retryNetworkPlayback(currentItemId, engineSnapshot?.currentTime ?? 0)
           ) {
             return;
@@ -848,7 +875,7 @@ export function PlaybackScreen() {
         const engineSnapshot = engine.getDiagnosticsSnapshot();
         if (
           currentItemId
-          && isNetworkPlaybackError(normalizedMessage, engineSnapshot.lastMediaErrorCode)
+          && isNetworkPlaybackError(normalizedMessage, engineSnapshot)
           && retryNetworkPlayback(currentItemId, engineSnapshot.currentTime)
         ) {
           return;

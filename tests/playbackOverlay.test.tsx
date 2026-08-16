@@ -295,6 +295,165 @@ describe('Phase 2 playback overlay', () => {
     expect(load).toHaveBeenCalledTimes(3);
   });
 
+  it('recovers a webOS decode error when it follows a sustained playback stall', async () => {
+    const load = vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+
+    render(
+      <AppProvider>
+        <PlaybackHarness />
+      </AppProvider>
+    );
+    await flushPlaybackWork();
+
+    const video = document.querySelector('video') as HTMLVideoElement;
+    Object.defineProperties(video, {
+      readyState: { configurable: true, value: 2 },
+      duration: { configurable: true, value: 3_200 },
+      currentTime: { configurable: true, writable: true, value: 2_825 },
+      error: {
+        configurable: true,
+        value: { code: 3, message: 'unknown media error' }
+      }
+    });
+    fireEvent.loadedData(video);
+    await flushPlaybackWork();
+
+    fireEvent.stalled(video);
+    fireEvent.waiting(video);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    fireEvent.error(video);
+
+    expect(screen.getByText('Connection interrupted. Retrying playback (1/2)…')).toBeTruthy();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(750);
+    });
+    await flushPlaybackWork();
+
+    expect(api.getPlaybackInfo).toHaveBeenCalledTimes(2);
+    expect(api.getPlaybackInfo.mock.calls[1]?.[1]).toBe('item-overlay');
+    expect(load).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not retry an immediate decode failure merely because webOS emitted waiting first', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+
+    render(
+      <AppProvider>
+        <PlaybackHarness />
+      </AppProvider>
+    );
+    await flushPlaybackWork();
+
+    const video = document.querySelector('video') as HTMLVideoElement;
+    Object.defineProperties(video, {
+      readyState: { configurable: true, value: 2 },
+      duration: { configurable: true, value: 1_200 },
+      currentTime: { configurable: true, writable: true, value: 120 },
+      error: {
+        configurable: true,
+        value: { code: 3, message: 'unknown media error' }
+      }
+    });
+    fireEvent.loadedData(video);
+    await flushPlaybackWork();
+
+    fireEvent.waiting(video);
+    fireEvent.error(video);
+    await flushPlaybackWork();
+
+    expect(api.getPlaybackInfo).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/Connection interrupted\. Retrying playback/)).toBeNull();
+    expect(screen.getByText('Playback error: unknown media error')).toBeTruthy();
+  });
+
+  it('does not delay a stalled-stream retry behind a pending progress report', async () => {
+    const load = vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+    const pendingProgress = defer<Record<string, never>>();
+    api.reportProgress.mockReturnValueOnce(pendingProgress.promise);
+
+    render(
+      <AppProvider>
+        <PlaybackHarness />
+      </AppProvider>
+    );
+    await flushPlaybackWork();
+
+    const video = document.querySelector('video') as HTMLVideoElement;
+    Object.defineProperties(video, {
+      readyState: { configurable: true, value: 2 },
+      duration: { configurable: true, value: 3_200 },
+      currentTime: { configurable: true, writable: true, value: 2_825 },
+      error: {
+        configurable: true,
+        value: { code: 3, message: 'unknown media error' }
+      }
+    });
+    fireEvent.loadedData(video);
+    await flushPlaybackWork();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(api.reportProgress).toHaveBeenCalledTimes(1);
+
+    fireEvent.waiting(video);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    fireEvent.error(video);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(750);
+    });
+    await flushPlaybackWork();
+
+    expect(api.getPlaybackInfo).toHaveBeenCalledTimes(2);
+    expect(load).toHaveBeenCalledTimes(3);
+
+    pendingProgress.resolve({});
+    await flushPlaybackWork();
+  });
+
+  it('does not classify an isolated webOS decode error as a network interruption', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+
+    render(
+      <AppProvider>
+        <PlaybackHarness />
+      </AppProvider>
+    );
+    await flushPlaybackWork();
+
+    const video = document.querySelector('video') as HTMLVideoElement;
+    Object.defineProperties(video, {
+      readyState: { configurable: true, value: 2 },
+      duration: { configurable: true, value: 1_200 },
+      currentTime: { configurable: true, writable: true, value: 120 },
+      error: {
+        configurable: true,
+        value: { code: 3, message: 'unknown media error' }
+      }
+    });
+    fireEvent.loadedData(video);
+    await flushPlaybackWork();
+
+    fireEvent.error(video);
+    await flushPlaybackWork();
+
+    expect(api.getPlaybackInfo).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/Connection interrupted\. Retrying playback/)).toBeNull();
+    expect(screen.getByText('Playback error: unknown media error')).toBeTruthy();
+  });
+
   it('waits for the ended report, advances once to the next Series episode, and replaces the playback route', async () => {
     const load = vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
     const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
