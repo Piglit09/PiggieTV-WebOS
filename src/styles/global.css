@@ -581,6 +581,11 @@ img.ptv-hero__art {
   background: #161024;
 }
 
+.ptv-card--landscape .ptv-card-art,
+.ptv-card--poster .ptv-card-art {
+  height: calc(100% - 58px);
+}
+
 .ptv-card-btn img,
 .ptv-card-placeholder {
   width: 100%;

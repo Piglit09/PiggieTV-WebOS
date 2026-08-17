@@ -37,6 +37,44 @@ describe('Chrome 68 CSS compatibility', () => {
     expect(miniPlayerRule).not.toMatch(/position\s*:\s*absolute\s*;/);
   });
 
+  it('gives generic landscape and poster artwork a definite non-zero height', () => {
+    const rootRule = css.match(/:root\s*\{([^}]*)\}/)?.[1] ?? '';
+    const landscapeCardRule = css.match(/\.ptv-card--landscape\s*\{([^}]*)\}/)?.[1] ?? '';
+    const posterCardRule = css.match(/\.ptv-card--poster\s*\{([^}]*)\}/)?.[1] ?? '';
+    const buttonRule = css.match(/\.ptv-card-btn\s*\{([^}]*)\}/)?.[1] ?? '';
+    const baseArtworkRule = css.match(/\.ptv-card-art\s*\{([^}]*)\}/)?.[1] ?? '';
+    const artworkRule = css.match(
+      /\.ptv-card--landscape \.ptv-card-art\s*,\s*\.ptv-card--poster \.ptv-card-art\s*\{([^}]*)\}/
+    )?.[1] ?? '';
+    const imageFillRule = css.match(
+      /\.ptv-card-btn img\s*,\s*\.ptv-card-placeholder\s*\{([^}]*)\}/
+    )?.[1] ?? '';
+    const copyRule = css.match(/\.ptv-card-copy\s*\{([^}]*)\}/)?.[1] ?? '';
+    const showsArtworkRule = css.match(/\.ptv-browse--shows \.ptv-card-art\s*\{([^}]*)\}/)?.[1] ?? '';
+    const episodeArtworkRule = css.match(
+      /\.ptv-details--episode \.ptv-card--episode \.ptv-card-art\s*\{([^}]*)\}/
+    )?.[1] ?? '';
+    const landscapeHeight = Number(rootRule.match(/--ptv-landscape-height\s*:\s*(\d+)px\s*;/)?.[1] ?? 0);
+    const posterHeight = Number(rootRule.match(/--ptv-poster-height\s*:\s*(\d+)px\s*;/)?.[1] ?? 0);
+
+    expect(landscapeCardRule).toMatch(/height\s*:\s*var\(--ptv-landscape-height\)\s*;/);
+    expect(posterCardRule).toMatch(/height\s*:\s*var\(--ptv-poster-height\)\s*;/);
+    expect(buttonRule).toMatch(/height\s*:\s*100%\s*;/);
+    expect(buttonRule).toMatch(/display\s*:\s*grid\s*;/);
+    expect(buttonRule).toMatch(/grid-template-rows\s*:\s*minmax\(0,\s*1fr\)\s+auto\s*;/);
+    expect(baseArtworkRule).toMatch(/position\s*:\s*relative\s*;/);
+    expect(imageFillRule).toMatch(/height\s*:\s*100%\s*;/);
+    expect(copyRule).toMatch(/min-height\s*:\s*58px\s*;/);
+    expect(artworkRule).toMatch(/height\s*:\s*calc\(100%\s*-\s*58px\)\s*;/);
+    expect(landscapeHeight).toBeGreaterThan(58);
+    expect(posterHeight).toBeGreaterThan(58);
+    expect(showsArtworkRule).toMatch(/height\s*:\s*270px\s*;/);
+    expect(episodeArtworkRule).toMatch(/height\s*:\s*100%\s*;/);
+    expect(css.indexOf('.ptv-card--landscape .ptv-card-art,')).toBeLessThan(
+      css.indexOf('.ptv-browse--shows .ptv-card-art')
+    );
+  });
+
   it('contains Shows titles without clipping the focused artwork glow', () => {
     const cardRule = css.match(/\.ptv-browse--shows \.ptv-card--poster\s*\{([^}]*)\}/)?.[1] ?? '';
     const buttonRule = css.match(/\.ptv-browse--shows \.ptv-card-btn\s*\{([^}]*)\}/)?.[1] ?? '';
