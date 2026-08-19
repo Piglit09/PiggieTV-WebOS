@@ -468,13 +468,26 @@ describe('Phase 2 playback overlay', () => {
     expect(screen.getByText('Playback error: unknown media error')).toBeTruthy();
   });
 
-  it('retries an LG unsupported-format error once with transcoding and does not loop', async () => {
+  it('retries an unsupported HEVC HLS remux once with full transcoding and does not loop', async () => {
     vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
     vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
     vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
     const pendingStoppedReport = defer<Record<string, never>>();
     api.reportStopped.mockReturnValueOnce(pendingStoppedReport.promise);
-    const transcodedPlaybackInfo = {
+    const hevcRemuxPlaybackInfo = {
+      PlaySessionId: 'session-remux',
+      MediaSources: [{
+        Id: 'source-remux',
+        Container: 'mkv',
+        VideoCodec: 'hevc',
+        AudioCodec: 'aac',
+        SupportsDirectPlay: false,
+        SupportsDirectStream: false,
+        SupportsTranscoding: true,
+        TranscodingUrl: '/Videos/item-overlay/master.m3u8?VideoCodec=hevc&AudioCodec=aac&SegmentContainer=ts'
+      }]
+    };
+    const fullTranscodePlaybackInfo = {
       PlaySessionId: 'session-transcode',
       MediaSources: [{
         Id: 'source-transcode',
@@ -488,20 +501,9 @@ describe('Phase 2 playback overlay', () => {
       }]
     };
     api.getPlaybackInfo
-      .mockResolvedValueOnce({
-        PlaySessionId: 'session-direct',
-        MediaSources: [{
-          Id: 'source-direct',
-          Container: 'mp4',
-          VideoCodec: 'h264',
-          AudioCodec: 'aac',
-          SupportsDirectPlay: true,
-          SupportsDirectStream: true,
-          SupportsTranscoding: true
-        }]
-      })
-      .mockResolvedValueOnce(transcodedPlaybackInfo)
-      .mockResolvedValueOnce(transcodedPlaybackInfo);
+      .mockResolvedValueOnce(hevcRemuxPlaybackInfo)
+      .mockResolvedValueOnce(fullTranscodePlaybackInfo)
+      .mockResolvedValueOnce(fullTranscodePlaybackInfo);
 
     render(
       <AppProvider>
@@ -514,6 +516,7 @@ describe('Phase 2 playback overlay', () => {
       allowVideoStreamCopy: true,
       allowAudioStreamCopy: true
     }));
+    expect(api.resolvePlaybackStreamUrl.mock.calls[0]?.[3]).toBe('transcode');
 
     const video = document.querySelector('video') as HTMLVideoElement;
     Object.defineProperties(video, {

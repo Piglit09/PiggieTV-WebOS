@@ -500,7 +500,6 @@ export function PlaybackScreen() {
 
           if (
             currentItemId
-            && engineSnapshot?.decision !== 'transcode'
             && isPlaybackFormatError(normalizedMessage, engineSnapshot)
             && !formatFallbackByItemRef.current.has(currentItemId)
           ) {
@@ -901,7 +900,6 @@ export function PlaybackScreen() {
         }
         if (
           currentItemId &&
-          engineSnapshot.decision !== 'transcode' &&
           isPlaybackFormatError(normalizedMessage, engineSnapshot) &&
           !formatFallbackByItemRef.current.has(currentItemId)
         ) {

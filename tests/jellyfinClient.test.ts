@@ -554,7 +554,16 @@ describe('JellyfinApiClient server identity compatibility', () => {
 
     expect(requestJson.mock.calls[0]?.[1]?.body).toEqual(expect.objectContaining({
       AllowVideoStreamCopy: true,
-      AllowAudioStreamCopy: true
+      AllowAudioStreamCopy: true,
+      DeviceProfile: expect.objectContaining({
+        TranscodingProfiles: expect.arrayContaining([
+          expect.objectContaining({
+            Container: 'ts',
+            Protocol: 'hls',
+            VideoCodec: 'h264,hevc'
+          })
+        ])
+      })
     }));
   });
 
