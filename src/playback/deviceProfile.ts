@@ -31,7 +31,7 @@ export function createPtvWebOsDeviceProfile(): Record<string, unknown> {
         Context: 'Streaming',
         MaxAudioChannels: '2',
         MinSegments: 1,
-        BreakOnNonKeyFrames: true
+        BreakOnNonKeyFrames: false
       },
       {
         Container: 'aac',

@@ -586,6 +586,18 @@ img.ptv-hero__art {
   height: calc(100% - 58px);
 }
 
+.ptv-card--episode .ptv-card-btn {
+  grid-template-rows: 168px 76px;
+}
+
+.ptv-card--episode .ptv-card-art {
+  height: 168px;
+}
+
+.ptv-card--episode .ptv-card-copy {
+  min-height: 76px;
+}
+
 .ptv-card-btn img,
 .ptv-card-placeholder {
   width: 100%;
@@ -915,6 +927,23 @@ img.ptv-details__backdrop {
 .ptv-details__actions button {
   min-width: 170px;
   font-size: 25px;
+}
+
+.ptv-details--series .ptv-details__actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ptv-details--series .ptv-details__actions svg {
+  display: block;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+}
+
+.ptv-details--series .ptv-details__actions button > * + * {
+  margin-left: 11px;
 }
 
 /* Movie details: cinematic full-viewport composition. */

@@ -99,6 +99,7 @@ const emptySnapshot: PlaybackDiagnosticsSnapshot = {
 
 const NETWORK_MEDIA_ERROR_CODE = 2;
 const DECODE_MEDIA_ERROR_CODE = 3;
+const UNSUPPORTED_SOURCE_MEDIA_ERROR_CODE = 4;
 const MAX_NETWORK_PLAYBACK_RETRIES = 2;
 const NETWORK_RETRY_DELAYS_MS = [750, 2_000] as const;
 const MIN_PLAYBACK_STALL_RECOVERY_MS = 15_000;
@@ -234,8 +235,12 @@ function normalizePlaybackErrorMessage(message: string) {
     .replace(/PiplineStatus::/i, 'PipelineStatus::');
 }
 
-function isDemuxerParseError(message: string) {
-  return /DEMUXER_ERROR_COULD_NOT_PARSE/i.test(message);
+function isPlaybackFormatError(
+  message: string,
+  snapshot?: PlaybackDiagnosticsSnapshot | null
+) {
+  return snapshot?.lastMediaErrorCode === UNSUPPORTED_SOURCE_MEDIA_ERROR_CODE
+    || /DEMUXER_ERROR_COULD_NOT_PARSE|MEDIA_ELEMENT_ERROR:\s*Format error|MEDIA_ERR_SRC_NOT_SUPPORTED/i.test(message);
 }
 
 function hasRecentPlaybackStall(snapshot?: PlaybackDiagnosticsSnapshot | null) {
@@ -347,7 +352,8 @@ export function PlaybackScreen() {
   const playerStateRef = useRef<PlaybackEngineState>('idle');
   const autoAdvanceControllerRef = useRef<AbortController | null>(null);
   const autoAdvanceStartedForItemRef = useRef<string | null>(null);
-  const demuxerParseRetryByItemRef = useRef<Set<string>>(new Set());
+  const formatFallbackByItemRef = useRef<Set<string>>(new Set());
+  const formatFallbackItemIdRef = useRef<string | null>(null);
   const networkRetryCountByItemRef = useRef<Map<string, number>>(new Map());
   const networkRetryTimerRef = useRef<number | null>(null);
 
@@ -482,7 +488,6 @@ export function PlaybackScreen() {
         onError: message => {
           const normalizedMessage = normalizePlaybackErrorMessage(message);
           const currentItemId = runtimeRef.current?.itemId;
-          const isDemuxerParse = isDemuxerParseError(normalizedMessage);
           const engineSnapshot = engineRef.current?.getDiagnosticsSnapshot();
 
           if (
@@ -493,17 +498,26 @@ export function PlaybackScreen() {
             return;
           }
 
-          if (isDemuxerParse && currentItemId && !demuxerParseRetryByItemRef.current.has(currentItemId)) {
-            demuxerParseRetryByItemRef.current.add(currentItemId);
-            setError(redactSensitiveText('Playback parse error. Retrying with transcoded stream...'));
+          if (
+            currentItemId
+            && engineSnapshot?.decision !== 'transcode'
+            && isPlaybackFormatError(normalizedMessage, engineSnapshot)
+            && !formatFallbackByItemRef.current.has(currentItemId)
+          ) {
+            formatFallbackByItemRef.current.add(currentItemId);
+            setError(redactSensitiveText('Playback format is not supported directly. Retrying with a compatible stream...'));
 
             const engine = engineRef.current;
-            void (async () => {
-              await engine?.stop('back');
-              if (engine && runtimeRef.current?.itemId === currentItemId) {
-                await engine.start({ itemId: currentItemId }).catch(() => {});
-              }
-            })();
+            const positionSeconds = Math.max(0, engineSnapshot?.currentTime ?? 0);
+            // Media teardown is synchronous. Keep compatibility recovery out
+            // of the playback-report queue so slow telemetry cannot stall it.
+            void engine?.stop('superseded');
+            if (engine && runtimeRef.current?.itemId === currentItemId) {
+              void engine.start({
+                itemId: currentItemId,
+                startPositionSeconds: positionSeconds
+              }).catch(() => {});
+            }
 
             return;
           }
@@ -522,7 +536,7 @@ export function PlaybackScreen() {
             throw new Error('Playback session is no longer active');
           }
 
-          const forceTranscode = demuxerParseRetryByItemRef.current.has(runtime.itemId);
+          const forceTranscode = formatFallbackByItemRef.current.has(runtime.itemId);
           const playbackSelectionInput = {
             preferredMode: forceTranscode ? 'transcode' as const : undefined,
             preferDirectPlay: forceTranscode ? false : runtime.settings.directPlayEnabled,
@@ -545,7 +559,9 @@ export function PlaybackScreen() {
                   : undefined,
               enableDirectPlay: playbackSelectionInput.preferDirectPlay,
               enableDirectStream: playbackSelectionInput.preferDirectStream,
-              enableTranscoding: playbackSelectionInput.allowTranscode
+              enableTranscoding: playbackSelectionInput.allowTranscode,
+              allowVideoStreamCopy: !forceTranscode,
+              allowAudioStreamCopy: !forceTranscode
             },
             context.signal
           );
@@ -849,7 +865,10 @@ export function PlaybackScreen() {
     const video = videoRef.current;
     if (!engine || !video || !intent || !userSession) return;
     setError(null);
-    demuxerParseRetryByItemRef.current.delete(intent.itemId);
+    if (formatFallbackItemIdRef.current !== intent.itemId) {
+      formatFallbackByItemRef.current.clear();
+      formatFallbackItemIdRef.current = intent.itemId;
+    }
     networkRetryCountByItemRef.current.delete(intent.itemId);
     if (networkRetryTimerRef.current !== null) {
       window.clearTimeout(networkRetryTimerRef.current);
@@ -881,18 +900,21 @@ export function PlaybackScreen() {
           return;
         }
         if (
-          isDemuxerParseError(normalizedMessage) &&
           currentItemId &&
-          !demuxerParseRetryByItemRef.current.has(currentItemId)
+          engineSnapshot.decision !== 'transcode' &&
+          isPlaybackFormatError(normalizedMessage, engineSnapshot) &&
+          !formatFallbackByItemRef.current.has(currentItemId)
         ) {
-          demuxerParseRetryByItemRef.current.add(currentItemId);
-          setError(redactSensitiveText('Playback parse error. Retrying with transcoded stream...'));
-          void (async () => {
-            await engine.stop('back');
-            if (engine && runtimeRef.current?.itemId === currentItemId) {
-              await engine.start({ itemId: currentItemId }).catch(() => {});
-            }
-          })();
+          formatFallbackByItemRef.current.add(currentItemId);
+          setError(redactSensitiveText('Playback format is not supported directly. Retrying with a compatible stream...'));
+          const positionSeconds = Math.max(0, engineSnapshot.currentTime);
+          void engine.stop('superseded');
+          if (runtimeRef.current?.itemId === currentItemId) {
+            void engine.start({
+              itemId: currentItemId,
+              startPositionSeconds: positionSeconds
+            }).catch(() => {});
+          }
         } else {
           setError(redactSensitiveText(normalizedMessage));
         }

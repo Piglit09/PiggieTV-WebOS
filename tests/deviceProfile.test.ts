@@ -22,7 +22,8 @@ describe('PTV webOS playback profile', () => {
       Type: 'Video',
       VideoCodec: 'h264',
       AudioCodec: 'aac',
-      Protocol: 'hls'
+      Protocol: 'hls',
+      BreakOnNonKeyFrames: false
     }));
   });
 });

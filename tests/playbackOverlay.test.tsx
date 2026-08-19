@@ -73,6 +73,20 @@ function PlaybackHarness({ autoPlayNext = true }: { autoPlayNext?: boolean }) {
   return (
     <>
       {playbackReady ? <PlaybackScreen /> : null}
+      <button
+        type="button"
+        hidden
+        data-testid="same-item-track-update"
+        onClick={() => {
+          if (!state.playbackIntent) return;
+          dispatch({
+            type: 'set_playback_intent',
+            playbackIntent: { ...state.playbackIntent, audioStreamIndex: 1 }
+          });
+        }}
+      >
+        Update same item track
+      </button>
       <output data-testid="playback-state">
         {`${state.route.screen}:${state.route.itemId ?? ''}${state.route.sectionId ? `?section=${state.route.sectionId}` : ''}|${state.routeHistory.map(route => `${route.screen}:${route.itemId ?? ''}`).join(',')}`}
       </output>
@@ -452,6 +466,113 @@ describe('Phase 2 playback overlay', () => {
     expect(api.getPlaybackInfo).toHaveBeenCalledTimes(1);
     expect(screen.queryByText(/Connection interrupted\. Retrying playback/)).toBeNull();
     expect(screen.getByText('Playback error: unknown media error')).toBeTruthy();
+  });
+
+  it('retries an LG unsupported-format error once with transcoding and does not loop', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+    const pendingStoppedReport = defer<Record<string, never>>();
+    api.reportStopped.mockReturnValueOnce(pendingStoppedReport.promise);
+    const transcodedPlaybackInfo = {
+      PlaySessionId: 'session-transcode',
+      MediaSources: [{
+        Id: 'source-transcode',
+        Container: 'mkv',
+        VideoCodec: 'hevc',
+        AudioCodec: 'ac3',
+        SupportsDirectPlay: false,
+        SupportsDirectStream: false,
+        SupportsTranscoding: true,
+        TranscodingUrl: '/Videos/item-overlay/master.m3u8'
+      }]
+    };
+    api.getPlaybackInfo
+      .mockResolvedValueOnce({
+        PlaySessionId: 'session-direct',
+        MediaSources: [{
+          Id: 'source-direct',
+          Container: 'mp4',
+          VideoCodec: 'h264',
+          AudioCodec: 'aac',
+          SupportsDirectPlay: true,
+          SupportsDirectStream: true,
+          SupportsTranscoding: true
+        }]
+      })
+      .mockResolvedValueOnce(transcodedPlaybackInfo)
+      .mockResolvedValueOnce(transcodedPlaybackInfo);
+
+    render(
+      <AppProvider>
+        <PlaybackHarness />
+      </AppProvider>
+    );
+    await flushPlaybackWork();
+
+    expect(api.getPlaybackInfo.mock.calls[0]?.[2]).toEqual(expect.objectContaining({
+      allowVideoStreamCopy: true,
+      allowAudioStreamCopy: true
+    }));
+
+    const video = document.querySelector('video') as HTMLVideoElement;
+    Object.defineProperties(video, {
+      readyState: { configurable: true, value: 2 },
+      duration: { configurable: true, value: 1_200 },
+      currentTime: { configurable: true, writable: true, value: 120 },
+      seekable: {
+        configurable: true,
+        value: {
+          length: 1,
+          start: () => 0,
+          end: () => 1_200
+        }
+      },
+      error: {
+        configurable: true,
+        value: { code: 4, message: 'MEDIA_ELEMENT_ERROR: Format error' }
+      }
+    });
+    fireEvent.loadedData(video);
+    await flushPlaybackWork();
+
+    fireEvent.error(video);
+    expect(screen.getByText('Playback format is not supported directly. Retrying with a compatible stream...')).toBeTruthy();
+    video.currentTime = 0;
+    await flushPlaybackWork();
+
+    expect(api.reportStopped).toHaveBeenCalledTimes(1);
+    expect(api.getPlaybackInfo).toHaveBeenCalledTimes(2);
+    expect(api.getPlaybackInfo.mock.calls[1]?.[2]).toEqual(expect.objectContaining({
+      enableDirectPlay: false,
+      enableDirectStream: false,
+      enableTranscoding: true,
+      allowVideoStreamCopy: false,
+      allowAudioStreamCopy: false
+    }));
+    expect(api.resolvePlaybackStreamUrl.mock.calls[1]?.[3]).toBe('transcode');
+
+    fireEvent.loadedData(video);
+    await flushPlaybackWork();
+    expect(video.currentTime).toBe(120);
+
+    fireEvent.click(screen.getByTestId('same-item-track-update'));
+    await flushPlaybackWork();
+    expect(api.getPlaybackInfo).toHaveBeenCalledTimes(3);
+    expect(api.getPlaybackInfo.mock.calls[2]?.[2]).toEqual(expect.objectContaining({
+      enableDirectPlay: false,
+      enableDirectStream: false,
+      enableTranscoding: true,
+      allowVideoStreamCopy: false,
+      allowAudioStreamCopy: false
+    }));
+
+    fireEvent.error(video);
+    await flushPlaybackWork();
+
+    expect(api.getPlaybackInfo).toHaveBeenCalledTimes(3);
+    expect(screen.getByText('Playback error: MEDIA_ELEMENT_ERROR: Format error')).toBeTruthy();
+    pendingStoppedReport.resolve({});
   });
 
   it('waits for the ended report, advances once to the next Series episode, and replaces the playback route', async () => {

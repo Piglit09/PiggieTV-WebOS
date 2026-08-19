@@ -909,14 +909,16 @@ export class JellyfinApiClient {
       enableDirectPlay?: boolean;
       enableDirectStream?: boolean;
       enableTranscoding?: boolean;
+      allowVideoStreamCopy?: boolean;
+      allowAudioStreamCopy?: boolean;
     } = {},
     signal?: AbortSignal
   ) {
     const payload: Record<string, unknown> = {
       DeviceProfile: options.profile || createPtvWebOsDeviceProfile(),
       UserId: sessionUserId,
-      AllowVideoStreamCopy: true,
-      AllowAudioStreamCopy: true,
+      AllowVideoStreamCopy: options.allowVideoStreamCopy ?? true,
+      AllowAudioStreamCopy: options.allowAudioStreamCopy ?? true,
       EnableDirectPlay: options.enableDirectPlay ?? true,
       EnableDirectStream: options.enableDirectStream ?? true,
       EnableTranscoding: options.enableTranscoding ?? true

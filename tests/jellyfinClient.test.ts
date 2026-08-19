@@ -551,6 +551,25 @@ describe('JellyfinApiClient server identity compatibility', () => {
       }),
       expect.any(Object)
     );
+
+    expect(requestJson.mock.calls[0]?.[1]?.body).toEqual(expect.objectContaining({
+      AllowVideoStreamCopy: true,
+      AllowAudioStreamCopy: true
+    }));
+  });
+
+  it('preserves explicit stream-copy overrides for compatibility recovery', async () => {
+    requestJson.mockResolvedValue({ MediaSources: [] });
+
+    await createClient().getPlaybackInfo('user-1', 'private-item-id', {
+      allowVideoStreamCopy: false,
+      allowAudioStreamCopy: false
+    });
+
+    expect(requestJson.mock.calls[0]?.[1]?.body).toEqual(expect.objectContaining({
+      AllowVideoStreamCopy: false,
+      AllowAudioStreamCopy: false
+    }));
   });
 
   it('sends complete playback state through one bounded, non-retrying report request', async () => {
