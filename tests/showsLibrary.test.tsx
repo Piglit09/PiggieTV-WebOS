@@ -42,6 +42,7 @@ const mockDiscoverCapabilities = vi.fn();
 const mockGetResume = vi.fn();
 const mockGetNextUp = vi.fn();
 const mockGetRecentlyAdded = vi.fn();
+const mockGetLibraries = vi.fn();
 const mockGetItems = vi.fn();
 const mockGetItem = vi.fn();
 const mockGetSimilarItems = vi.fn();
@@ -67,6 +68,7 @@ vi.mock('../src/api/jellyfin/client', () => ({
       getResume: (...args: unknown[]) => mockGetResume(...args),
       getNextUp: (...args: unknown[]) => mockGetNextUp(...args),
       getRecentlyAdded: (...args: unknown[]) => mockGetRecentlyAdded(...args),
+      getLibraries: (...args: unknown[]) => mockGetLibraries(...args),
       getItems: (...args: unknown[]) => mockGetItems(...args),
       getItem: (...args: unknown[]) => mockGetItem(...args),
       getSimilarItems: (...args: unknown[]) => mockGetSimilarItems(...args),
@@ -257,6 +259,7 @@ beforeEach(() => {
     mockGetResume,
     mockGetNextUp,
     mockGetRecentlyAdded,
+    mockGetLibraries,
     mockGetItems,
     mockGetItem,
     mockGetSimilarItems,
@@ -276,6 +279,9 @@ beforeEach(() => {
   mockGetResume.mockResolvedValue({ Items: [] });
   mockGetNextUp.mockResolvedValue({ Items: [] });
   mockGetRecentlyAdded.mockResolvedValue({ Items: [] });
+  mockGetLibraries.mockResolvedValue({
+    Items: [{ Id: 'shows-root', Name: 'Shows', CollectionType: 'tvshows' }]
+  });
   mockGetSimilarItems.mockResolvedValue({ Items: [] });
   mockGetSeasons.mockResolvedValue({ Items: [] });
   mockGetEpisodes.mockResolvedValue({ Items: [] });
@@ -319,6 +325,47 @@ describe('ShowsLibraryScreen bounded incremental loading', () => {
     await waitFor(() => expect(activeSentinelObserver()?.instance.root).toBe(
       document.querySelector('.ptv-browse__viewport')
     ));
+  });
+
+  it('fans out across typed TV libraries without heavy recursive count fields', async () => {
+    installIntersectionObserver();
+    mockGetLibraries.mockResolvedValueOnce({
+      Items: [
+        { Id: 'shows-a', Name: 'Shows A', CollectionType: 'tvshows' },
+        { Id: 'shows-b', Name: 'Shows B', CollectionType: 'tvshows' },
+        { Id: 'shows-c', Name: 'Shows C', CollectionType: 'tvshows' }
+      ]
+    });
+    mockGetItems.mockImplementation((_userId: string, query: Record<string, unknown>) => {
+      const parentId = String(query.ParentId ?? '');
+      const suffix = parentId.slice(-1).toUpperCase();
+      return Promise.resolve({
+        Items: seriesBatch(1, 2, `Library ${suffix}`, parentId),
+        TotalRecordCount: 2
+      });
+    });
+
+    await openShows();
+    await screen.findByRole('button', { name: 'Library C 2, 2026' });
+
+    expect(mockGetLibraries).toHaveBeenCalledTimes(1);
+    expect(mockGetItems).toHaveBeenCalledTimes(3);
+    expect(mockGetItems.mock.calls.map(call => call[1])).toEqual(expect.arrayContaining([
+      expect.objectContaining({ ParentId: 'shows-a' }),
+      expect.objectContaining({ ParentId: 'shows-b' }),
+      expect.objectContaining({ ParentId: 'shows-c' })
+    ]));
+    for (const call of mockGetItems.mock.calls) {
+      expect(call[1]).toEqual(expect.objectContaining({
+        Fields: 'DateCreated',
+        EnableTotalRecordCount: false,
+        Limit: 24,
+        StartIndex: 0
+      }));
+      expect(String(call[1]?.Fields)).not.toMatch(/ChildCount|RecursiveItemCount|Overview|Genres/);
+    }
+    expect(document.querySelectorAll('.ptv-poster-grid .ptv-card-btn')).toHaveLength(6);
+    expect(screen.getByText('6 titles')).toBeTruthy();
   });
 
   it('appends one guarded batch without moving focus from an existing card', async () => {

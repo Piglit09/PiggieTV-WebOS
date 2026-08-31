@@ -26,6 +26,7 @@ import {
 } from './showsRenderWindow';
 
 const SHOWS_BATCH_SIZE = 24;
+const SHOWS_PARENT_QUERY_CONCURRENCY = 3;
 const SHOWS_PREFETCH_MARGIN = '900px 0px';
 const SHOWS_ARTWORK_PREFETCH_MARGIN = '720px 0px';
 const SHOWS_MAX_CONCURRENT_ARTWORK_LOADS = 6;
@@ -48,6 +49,76 @@ interface InitialShowsSnapshot {
   filter: MediaBrowseFilter;
   request: LoadRequest | null;
   window: ReturnType<typeof readBrowseWindow>;
+}
+
+interface ShowsPageResponse {
+  HasMorePage: boolean;
+  Items: Array<Record<string, unknown>>;
+  TotalRecordCount?: number;
+}
+
+function rawShowsSortKey(item: Record<string, unknown>, filter: MediaBrowseFilter) {
+  if (filter === 'recent') {
+    return typeof item.DateCreated === 'string' ? item.DateCreated : '';
+  }
+  if (typeof item.SortName === 'string' && item.SortName.trim()) return item.SortName;
+  return typeof item.Name === 'string' ? item.Name : '';
+}
+
+function mergeShowsPages(
+  responses: Array<{ Items: Array<Record<string, unknown>>; TotalRecordCount?: number }>,
+  filter: MediaBrowseFilter,
+  startIndex: number
+): ShowsPageResponse {
+  const itemsById = new Map<string, Record<string, unknown>>();
+  for (const response of responses) {
+    for (const item of Array.isArray(response.Items) ? response.Items : []) {
+      if (typeof item.Id !== 'string' || !item.Id.trim() || itemsById.has(item.Id)) continue;
+      itemsById.set(item.Id, item);
+    }
+  }
+
+  const items = Array.from(itemsById.values());
+  items.sort((left, right) => {
+    const leftKey = rawShowsSortKey(left, filter);
+    const rightKey = rawShowsSortKey(right, filter);
+    const comparison = leftKey.localeCompare(rightKey, undefined, { sensitivity: 'base' });
+    return filter === 'recent' ? -comparison : comparison;
+  });
+
+  const totals = responses.map(response => response.TotalRecordCount);
+  const hasCompleteTotals = totals.length > 0 && totals.every(value => typeof value === 'number');
+  return {
+    Items: items,
+    TotalRecordCount: hasCompleteTotals
+      ? totals.reduce<number>((sum, value) => sum + (value ?? 0), 0)
+      : undefined,
+    HasMorePage: responses.some(response => {
+      const itemCount = Array.isArray(response.Items) ? response.Items.length : 0;
+      return typeof response.TotalRecordCount === 'number'
+        ? startIndex + itemCount < response.TotalRecordCount
+        : itemCount === SHOWS_BATCH_SIZE;
+    })
+  };
+}
+
+async function loadShowsParentPages(
+  parentIds: string[],
+  loadParent: (parentId?: string) => Promise<{
+    Items: Array<Record<string, unknown>>;
+    TotalRecordCount?: number;
+  }>
+) {
+  if (!parentIds.length) return [await loadParent()];
+  const responses: Array<{
+    Items: Array<Record<string, unknown>>;
+    TotalRecordCount?: number;
+  }> = [];
+  for (let index = 0; index < parentIds.length; index += SHOWS_PARENT_QUERY_CONCURRENCY) {
+    const batch = parentIds.slice(index, index + SHOWS_PARENT_QUERY_CONCURRENCY);
+    responses.push(...await Promise.all(batch.map(parentId => loadParent(parentId))));
+  }
+  return responses;
 }
 
 function appendUniqueItems(current: PtvItem[], incoming: PtvItem[]) {
@@ -108,6 +179,7 @@ export function ShowsLibraryScreen() {
   const [nextStartIndex, setNextStartIndex] = useState(initialSnapshot.window?.nextStartIndex ?? 0);
   const [total, setTotal] = useState<number | null>(initialSnapshot.window?.totalRecordCount ?? null);
   const [hasMore, setHasMore] = useState(initialSnapshot.window?.hasMore ?? true);
+  const parentScopeRef = useRef<{ cacheKey: string; parentIds: string[] } | null>(null);
   const [request, setRequest] = useState<LoadRequest | null>(initialSnapshot.request);
   const [error, setError] = useState<string | null>(null);
   const [observerFailed, setObserverFailed] = useState(false);
@@ -348,18 +420,44 @@ export function ShowsLibraryScreen() {
     const controller = new AbortController();
     setError(null);
 
-    void client.getItems(userSession.userId, {
-      IncludeItemTypes: 'Series',
-      Recursive: true,
-      StartIndex: request.startIndex,
-      Limit: SHOWS_BATCH_SIZE,
-      SortBy: request.filter === 'recent' ? 'DateCreated' : 'SortName',
-      SortOrder: request.filter === 'recent' ? 'Descending' : 'Ascending',
-      Filters: request.filter === 'favorites' ? 'IsFavorite' : undefined,
-      Fields: 'ImageTags,BackdropImageTags,Overview,ProductionYear,RunTimeTicks,OfficialRating,CommunityRating,Genres,UserData,ChildCount,RecursiveItemCount',
-      EnableUserData: true,
-      EnableTotalRecordCount: true
-    }, controller.signal)
+    void (async () => {
+      let parentIds = parentScopeRef.current?.cacheKey === cacheKey
+        ? parentScopeRef.current.parentIds
+        : null;
+      if (!parentIds) {
+        const libraries = await client.getLibraries(userSession.userId, controller.signal);
+        const typedLibraries = (Array.isArray(libraries.Items) ? libraries.Items : []).filter(item => (
+          typeof item.Id === 'string' && item.Id.trim()
+        ));
+        const tvLibraries = typedLibraries.filter(item => (
+          item.CollectionType?.trim().toLocaleLowerCase() === 'tvshows'
+        ));
+        const scopedLibraries = tvLibraries.length
+          ? tvLibraries
+          : typedLibraries.filter(item => item.CollectionType?.trim().toLocaleLowerCase() === 'mixed');
+        parentIds = Array.from(new Set(scopedLibraries.map(item => item.Id.trim())));
+        parentScopeRef.current = { cacheKey, parentIds };
+      }
+
+      const responses = await loadShowsParentPages(parentIds, parentId => client.getItems(
+        userSession.userId,
+        {
+          ParentId: parentId,
+          IncludeItemTypes: 'Series',
+          Recursive: true,
+          StartIndex: request.startIndex,
+          Limit: SHOWS_BATCH_SIZE,
+          SortBy: request.filter === 'recent' ? 'DateCreated' : 'SortName',
+          SortOrder: request.filter === 'recent' ? 'Descending' : 'Ascending',
+          Filters: request.filter === 'favorites' ? 'IsFavorite' : undefined,
+          Fields: request.filter === 'recent' ? 'DateCreated' : 'SortName',
+          EnableUserData: true,
+          EnableTotalRecordCount: false
+        },
+        controller.signal
+      ));
+      return mergeShowsPages(responses, request.filter, request.startIndex);
+    })()
       .then(response => {
         if (
           controller.signal.aborted
@@ -372,12 +470,8 @@ export function ShowsLibraryScreen() {
         const resolvedTotal = typeof response.TotalRecordCount === 'number'
           ? response.TotalRecordCount
           : total;
-        const resolvedNextStartIndex = request.startIndex + sourceCount;
-        const resolvedHasMore = sourceCount > 0 && (
-          resolvedTotal !== null
-            ? resolvedNextStartIndex < resolvedTotal
-            : sourceCount === SHOWS_BATCH_SIZE
-        );
+        const resolvedNextStartIndex = request.startIndex + SHOWS_BATCH_SIZE;
+        const resolvedHasMore = sourceCount > 0 && response.HasMorePage;
         const resolvedItems = request.replace ? appendUniqueItems([], mapped) : appendUniqueItems(items, mapped);
 
         if (
