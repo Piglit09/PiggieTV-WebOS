@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
   reportStopped: vi.fn(),
   resolvePlaybackStreamUrl: vi.fn(),
   setAccessToken: vi.fn(),
+  setAuthenticatedRequestContextProvider: vi.fn(),
   setServer: vi.fn()
 }));
 
@@ -22,23 +23,30 @@ vi.mock('../src/api/jellyfin/client', () => ({
     reportPlaying: (...args: unknown[]) => api.reportPlaying(...args),
     reportProgress: (...args: unknown[]) => api.reportProgress(...args),
     reportStopped: (...args: unknown[]) => api.reportStopped(...args),
+    resolvePlaybackStreamUrl: (...args: unknown[]) => api.resolvePlaybackStreamUrl(...args),
     setAccessToken: (token?: string) => api.setAccessToken(token),
+    setAuthenticatedRequestContextProvider: (provider?: unknown) =>
+      api.setAuthenticatedRequestContextProvider(provider),
     setServer: (serverUrl: string) => api.setServer(serverUrl)
   })),
   resolvePlaybackStreamUrl: (...args: unknown[]) => api.resolvePlaybackStreamUrl(...args)
 }));
 
 function PlaybackHarness({ autoPlayNext = true }: { autoPlayNext?: boolean }) {
-  const { state, dispatch } = useApp();
+  const { state, dispatch, services } = useApp();
 
   useEffect(() => {
+    const lease = services.auth.beginPasswordAuthentication();
+    services.jellyfin.configureSession('https://server.example.test', 'test-token');
+    const ticket = services.auth.commitAuthenticated(lease);
+    if (!ticket) throw new Error('Expected test authentication ownership');
+    services.activateAuthenticatedRequestContext(ticket);
     dispatch({ type: 'set_server_url', serverUrl: 'https://server.example.test' });
     dispatch({
       type: 'set_user_session',
       userSession: {
         userId: 'user-overlay',
         userName: 'Overlay User',
-        accessToken: 'test-token',
         serverId: 'server-overlay',
         serverUrl: 'https://server.example.test',
         deviceId: 'device-overlay',
@@ -67,7 +75,7 @@ function PlaybackHarness({ autoPlayNext = true }: { autoPlayNext?: boolean }) {
       type: 'set_route',
       route: { screen: 'playback', itemId: 'item-overlay', sectionId: null }
     });
-  }, [autoPlayNext, dispatch]);
+  }, [autoPlayNext, dispatch, services]);
 
   const playbackReady = state.route.screen === 'playback' && state.playbackIntent && state.userSession;
   return (
@@ -95,16 +103,20 @@ function PlaybackHarness({ autoPlayNext = true }: { autoPlayNext?: boolean }) {
 }
 
 function AudioPlaybackHarness({ withQueue = false }: { withQueue?: boolean }) {
-  const { state, dispatch } = useApp();
+  const { state, dispatch, services } = useApp();
 
   useEffect(() => {
+    const lease = services.auth.beginPasswordAuthentication();
+    services.jellyfin.configureSession('https://server.example.test', 'audio-token');
+    const ticket = services.auth.commitAuthenticated(lease);
+    if (!ticket) throw new Error('Expected test authentication ownership');
+    services.activateAuthenticatedRequestContext(ticket);
     dispatch({ type: 'set_server_url', serverUrl: 'https://server.example.test' });
     dispatch({
       type: 'set_user_session',
       userSession: {
         userId: 'user-audio-overlay',
         userName: 'Overlay Audio User',
-        accessToken: 'audio-token',
         serverId: 'server-overlay',
         serverUrl: 'https://server.example.test',
         deviceId: 'device-overlay-audio',
@@ -142,7 +154,7 @@ function AudioPlaybackHarness({ withQueue = false }: { withQueue?: boolean }) {
       }
     });
     dispatch({ type: 'set_route', route: { screen: 'playback', itemId: 'audio-track-overlay', sectionId: null } });
-  }, [dispatch, withQueue]);
+  }, [dispatch, services, withQueue]);
 
   const playbackReady = state.route.screen === 'playback' && state.playbackIntent?.kind === 'audio' && state.userSession;
   return (
@@ -175,7 +187,7 @@ beforeEach(() => {
   api.reportProgress.mockResolvedValue({});
   api.reportStopped.mockResolvedValue({});
   api.getNextUpForSeries.mockResolvedValue({ Items: [] });
-  api.resolvePlaybackStreamUrl.mockImplementation((_serverUrl: string, itemId: string) => (
+  api.resolvePlaybackStreamUrl.mockImplementation((itemId: string) => (
     `https://media.example.test/Videos/${itemId}/stream.mp4`
   ));
 });
@@ -516,7 +528,7 @@ describe('Phase 2 playback overlay', () => {
       allowVideoStreamCopy: true,
       allowAudioStreamCopy: true
     }));
-    expect(api.resolvePlaybackStreamUrl.mock.calls[0]?.[3]).toBe('transcode');
+    expect(api.resolvePlaybackStreamUrl.mock.calls[0]?.[2]).toBe('transcode');
 
     const video = document.querySelector('video') as HTMLVideoElement;
     Object.defineProperties(video, {
@@ -553,7 +565,7 @@ describe('Phase 2 playback overlay', () => {
       allowVideoStreamCopy: false,
       allowAudioStreamCopy: false
     }));
-    expect(api.resolvePlaybackStreamUrl.mock.calls[1]?.[3]).toBe('transcode');
+    expect(api.resolvePlaybackStreamUrl.mock.calls[1]?.[2]).toBe('transcode');
 
     fireEvent.loadedData(video);
     await flushPlaybackWork();

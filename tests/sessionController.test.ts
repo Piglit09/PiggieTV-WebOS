@@ -5,10 +5,16 @@ import {
   type AuthenticationResponse,
   type PasswordAuthenticationRequest,
   type PersistedAuthenticatedSession,
+  type SessionApi,
   type SessionControllerDependencies,
-  type SessionDiagnosticSnapshot
+  type SessionDiagnosticSnapshot,
+  type SessionOperationContext
 } from '../src/auth/sessionController';
 import type { PtvQuickConnectStateResponse } from '../src/api/jellyfin/client';
+import {
+  AuthSessionCoordinator,
+  type AuthenticatedSessionTicket
+} from '../src/auth/authSessionCoordinator';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -37,44 +43,67 @@ const quickConnectState = (authenticated: boolean): PtvQuickConnectStateResponse
   AppVersion: '0.1.0'
 });
 
-function createHarness(overrides: Partial<SessionControllerDependencies> = {}) {
+type HarnessOverrides = Omit<Partial<SessionControllerDependencies>, 'api'> & {
+  api?: Partial<SessionApi>;
+};
+
+function createHarness(overrides: HarnessOverrides = {}) {
   const diagnostics: SessionDiagnosticSnapshot[] = [];
   const order: string[] = [];
+  const navigationCurrentChecks: boolean[] = [];
+  const activationStates: string[] = [];
   const persisted: PersistedAuthenticatedSession[] = [];
+  const ownership = overrides.ownership ?? new AuthSessionCoordinator();
   const authenticateByName = vi.fn(async (request: PasswordAuthenticationRequest) => {
     request.onResponseReceived?.({ status: 200, contentType: 'application/json' });
     request.onJsonParsed?.({ status: 200, contentType: 'application/json' });
     return validResponse();
   });
-  const setAuthenticationContext = vi.fn(async () => {
+  const setAuthenticationContext = vi.fn(() => {
     order.push('api-context');
   });
-  const persistSessionAtomically = vi.fn(async (session: PersistedAuthenticatedSession) => {
+  const activateAuthenticatedRequestContext = vi.fn((
+    ticket: AuthenticatedSessionTicket
+  ) => {
+    void ticket;
+    activationStates.push(ownership.getSnapshot().state);
+    order.push('activate-context');
+  });
+  const persistSessionAtomically = vi.fn(async (
+    session: PersistedAuthenticatedSession,
+    _context: SessionOperationContext,
+    activate: () => AuthenticatedSessionTicket
+  ) => {
     order.push('persist');
     persisted.push(session);
+    return activate();
   });
-  const commitAuthenticatedSession = vi.fn(async () => {
+  const commitAuthenticatedSession = vi.fn(() => {
     order.push('state');
   });
-  const navigateHome = vi.fn(async () => {
+  const navigateHome = vi.fn((context: SessionOperationContext) => {
+    navigationCurrentChecks.push(context.isCurrent());
     order.push('navigate');
   });
 
   const base: SessionControllerDependencies = {
+    ...overrides,
+    ownership,
     api: {
       authenticateByName,
-      setAuthenticationContext
+      setAuthenticationContext,
+      activateAuthenticatedRequestContext,
+      ...overrides.api
     },
-    persistence: { persistSessionAtomically },
-    state: { commitAuthenticatedSession },
-    navigation: { navigateHome },
-    getDeviceIdentity: () => ({
+    persistence: overrides.persistence ?? { persistSessionAtomically },
+    state: overrides.state ?? { commitAuthenticatedSession },
+    navigation: overrides.navigation ?? { navigateHome },
+    getDeviceIdentity: overrides.getDeviceIdentity ?? (() => ({
       deviceId: 'stable-device-id',
       deviceName: 'Living Room TV',
       applicationVersion: '0.1.0'
-    }),
-    diagnostics: { record: snapshot => diagnostics.push(snapshot) },
-    ...overrides
+    })),
+    diagnostics: overrides.diagnostics ?? { record: snapshot => diagnostics.push(snapshot) }
   };
   const controller = new SessionController(base);
 
@@ -82,9 +111,13 @@ function createHarness(overrides: Partial<SessionControllerDependencies> = {}) {
     controller,
     diagnostics,
     order,
+    navigationCurrentChecks,
+    activationStates,
     persisted,
+    ownership,
     authenticateByName,
     setAuthenticationContext,
+    activateAuthenticatedRequestContext,
     persistSessionAtomically,
     commitAuthenticatedSession,
     navigateHome
@@ -106,8 +139,19 @@ describe('SessionController password authentication', () => {
 
     expect(result.status).toBe('success');
     expect(result.classification).toBe('success');
-    expect(harness.order).toEqual(['persist', 'api-context', 'state', 'navigate']);
+    expect(harness.order).toEqual(['persist', 'api-context', 'activate-context', 'state', 'navigate']);
     expect(harness.navigateHome).toHaveBeenCalledTimes(1);
+    const [ticket] = harness.activateAuthenticatedRequestContext.mock.calls[0] ?? [];
+    const navigationContext = harness.navigateHome.mock.calls[0]?.[0];
+    expect(ticket).toBe(harness.ownership.captureAuthenticatedRequest()?.ticket);
+    expect(navigationContext?.signal).toBe(harness.ownership.captureAuthenticatedRequest()?.signal);
+    expect(harness.navigationCurrentChecks).toEqual([true]);
+    expect(harness.activationStates).toEqual(['AUTHENTICATED']);
+    expect(harness.ownership.getSnapshot()).toMatchObject({
+      state: 'AUTHENTICATED',
+      activeOperation: null,
+      authenticated: true
+    });
     expect(harness.persisted).toHaveLength(1);
     expect(harness.persisted[0]).toMatchObject({
       schemaVersion: 1,
@@ -211,6 +255,55 @@ describe('SessionController password authentication', () => {
     expect(harness.navigateHome).not.toHaveBeenCalled();
   });
 
+  it('preserves an incumbent authenticated epoch when replacement credentials are rejected', async () => {
+    const ownership = new AuthSessionCoordinator();
+    const restore = ownership.beginRestore();
+    const incumbentTicket = ownership.commitAuthenticated(restore);
+    const incumbentContext = ownership.captureAuthenticatedRequest();
+    const harness = createHarness({
+      ownership,
+      api: {
+        authenticateByName: vi.fn(async () => {
+          throw { status: 401, message: 'Invalid user' };
+        })
+      }
+    });
+
+    const result = await harness.controller.authenticateByName(passwordInput);
+
+    expect(result).toMatchObject({ status: 'error', classification: 'invalid-credentials' });
+    expect(ownership.captureAuthenticatedRequest()?.ticket).toBe(incumbentTicket);
+    expect(incumbentContext?.isCurrent()).toBe(true);
+    expect(ownership.getSnapshot()).toMatchObject({
+      state: 'AUTHENTICATED',
+      activeOperation: null,
+      authenticated: true,
+      lastFailure: 'AUTH_REJECTED'
+    });
+    expect(harness.setAuthenticationContext).not.toHaveBeenCalled();
+    expect(harness.persistSessionAtomically).not.toHaveBeenCalled();
+  });
+
+  it('maps a connectivity failure and releases the global operation lease', async () => {
+    const harness = createHarness({
+      api: {
+        authenticateByName: vi.fn(async () => {
+          throw new TypeError('Network request failed');
+        })
+      }
+    });
+
+    const result = await harness.controller.authenticateByName(passwordInput);
+
+    expect(result).toMatchObject({ status: 'error', classification: 'network-error' });
+    expect(harness.ownership.getSnapshot()).toMatchObject({
+      state: 'CONNECTIVITY_ERROR',
+      activeOperation: null,
+      authenticated: false,
+      lastFailure: 'CONNECTIVITY_ERROR'
+    });
+  });
+
   it('rejects a malformed authentication response before persistence', async () => {
     const harness = createHarness({
       api: {
@@ -227,6 +320,11 @@ describe('SessionController password authentication', () => {
     expect(result).toMatchObject({ status: 'error', classification: 'invalid-response' });
     expect(harness.persistSessionAtomically).not.toHaveBeenCalled();
     expect(harness.diagnostics.at(-1)?.stage).toBe('FAILED');
+    expect(harness.ownership.getSnapshot()).toMatchObject({
+      state: 'UNAUTHENTICATED',
+      activeOperation: null,
+      lastFailure: null
+    });
   });
 
   it('uses the validated server ID when Jellyfin omits ServerId', async () => {
@@ -282,6 +380,41 @@ describe('SessionController password authentication', () => {
     );
   });
 
+  it('lets external logout cancel persistence without publishing or navigating stale state', async () => {
+    const persistenceStarted = deferred<void>();
+    const releasePersistence = deferred<void>();
+    const persisted: string[] = [];
+    const ownership = new AuthSessionCoordinator();
+    const harness = createHarness({
+      ownership,
+      persistence: {
+        persistSessionAtomically: vi.fn(async (session, context, activate) => {
+          persistenceStarted.resolve();
+          await releasePersistence.promise;
+          if (!context.isCurrent()) throw new Error('superseded persistence');
+          persisted.push(session.userId);
+          return activate();
+        })
+      }
+    });
+
+    const operation = harness.controller.authenticateByName(passwordInput);
+    await persistenceStarted.promise;
+    const logoutLease = ownership.beginLogout();
+    const result = await operation;
+    releasePersistence.resolve();
+    await Promise.resolve();
+
+    expect(result).toMatchObject({ status: 'idle', classification: 'cancelled' });
+    expect(persisted).toEqual([]);
+    expect(harness.setAuthenticationContext).not.toHaveBeenCalled();
+    expect(harness.commitAuthenticatedSession).not.toHaveBeenCalled();
+    expect(harness.activateAuthenticatedRequestContext).not.toHaveBeenCalled();
+    expect(harness.navigateHome).not.toHaveBeenCalled();
+    expect(ownership.getSnapshot()).toMatchObject({ state: 'LOGGING_OUT', activeOperation: 'logout' });
+    expect(ownership.completeLogout(logoutLease)).toBe(true);
+  });
+
   it('redacts passwords and tokens from diagnostics', async () => {
     const token = 'super-secret-access-token';
     const password = 'private-password';
@@ -331,6 +464,11 @@ describe('SessionController password authentication', () => {
       navigationRequested: false,
       navigationRequestCount: 0
     });
+    expect(harness.ownership.getSnapshot()).toMatchObject({
+      state: 'STORAGE_ERROR',
+      activeOperation: null,
+      lastFailure: 'STORAGE_ERROR'
+    });
   });
 });
 
@@ -358,7 +496,11 @@ describe('SessionController Quick Connect', () => {
     });
     const setAuthenticationContext = vi.fn();
     const sleep = vi.fn(async () => undefined);
+    const ownership = new AuthSessionCoordinator();
+    const authStates: string[] = [];
+    ownership.subscribe(snapshot => authStates.push(snapshot.state));
     const harness = createHarness({
+      ownership,
       api: {
         authenticateByName: vi.fn(),
         initiateQuickConnect,
@@ -398,6 +540,13 @@ describe('SessionController Quick Connect', () => {
     expect(authenticateWithQuickConnect.mock.calls[0]?.[0].signal).toBe(attemptSignal);
     expect(harness.persistSessionAtomically).toHaveBeenCalledTimes(1);
     expect(harness.navigateHome).toHaveBeenCalledTimes(1);
+    expect(authStates).toEqual(expect.arrayContaining([
+      'QUICK_CONNECT_WAITING',
+      'AUTHENTICATING',
+      'AUTHENTICATED'
+    ]));
+    expect(authStates.indexOf('QUICK_CONNECT_WAITING')).toBeLessThan(authStates.indexOf('AUTHENTICATING'));
+    expect(authStates.indexOf('AUTHENTICATING')).toBeLessThan(authStates.indexOf('AUTHENTICATED'));
     expect(JSON.stringify(harness.diagnostics)).not.toContain('quick-secret');
   });
 
@@ -431,6 +580,11 @@ describe('SessionController Quick Connect', () => {
     expect(authenticateWithQuickConnect).not.toHaveBeenCalled();
     expect(harness.persistSessionAtomically).not.toHaveBeenCalled();
     expect(harness.navigateHome).not.toHaveBeenCalled();
+    expect(harness.ownership.getSnapshot()).toMatchObject({
+      state: 'UNAUTHENTICATED',
+      activeOperation: null,
+      authenticated: false
+    });
     expect(JSON.stringify({ result, diagnostics: harness.diagnostics })).not.toContain('cancel-secret');
   });
 

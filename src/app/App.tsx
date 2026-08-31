@@ -10,6 +10,8 @@ import { toPtvError } from '../core/errors';
 import { GlobalRemoteInput } from '../focus/GlobalRemoteInput';
 import { createHomeCacheSessionKey, synchronizeHomeCacheSession } from '../state/homeCache';
 import { createMediaCacheSessionKey, synchronizeMediaCacheSession } from '../state/mediaCache';
+import { attachAuthenticatedResourceErrorBridge } from '../auth/authenticatedResourceErrorBridge';
+import { InvalidLocalSessionError } from '../storage/repository';
 import type { PtvError, PtvRoute, PtvServerSession, PtvUserSession } from '../types/ptv';
 
 type StartupScreen = PtvRoute['screen'];
@@ -220,7 +222,14 @@ function StartupCoordinator() {
   useEffect(() => {
     const lease = services.startupRestore.acquire(
       `bootstrap-${state.bootstrapRetryNonce}`,
-      async ({ signal, generation, isCurrent }) => {
+      async ({ signal, generation, isCurrent: isStartupCurrent }) => {
+        const authLease = services.auth.beginRestore();
+        let committedRequestIsCurrent: (() => boolean) | null = null;
+        const isCurrent = () => isStartupCurrent() && (
+          committedRequestIsCurrent ? committedRequestIsCurrent() : authLease.isCurrent()
+        );
+        const cancelRestore = () => services.auth.cancel(authLease);
+        signal.addEventListener('abort', cancelRestore, { once: true });
 
         const setStartup = (message: string, error: string | null = null) => {
           if (!isCurrent()) return;
@@ -240,9 +249,11 @@ function StartupCoordinator() {
         };
 
         const boot = async () => {
-          const stored = services.storage.getState();
-          const savedSession = stored.session;
-          const requestedServer = savedSession?.serverUrl || stored.lastServerUrl || PTV_PRODUCTION_SERVER_URL;
+          let stored = services.storage.getState();
+          let savedSession: Awaited<ReturnType<typeof services.storage.restoreSession>> = null;
+          let requestedServer = services.storage.getStoredSessionServerUrl()
+            || stored.lastServerUrl
+            || PTV_PRODUCTION_SERVER_URL;
           const restoreStartedAt = Date.now();
           const restoreAttemptId = `restore-${generation}`;
           const recordRestore = (
@@ -257,24 +268,83 @@ function StartupCoordinator() {
             durationMs: Math.max(0, Date.now() - restoreStartedAt),
             envelopeSchemaVersion: stored.schemaVersion,
             sessionSchemaVersion: savedSession?.schemaVersion ?? null,
-            sessionPresent: Boolean(savedSession),
-            tokenPresent: Boolean(savedSession?.accessToken),
+            sessionPresent: Boolean(savedSession) || services.storage.hasStoredSession(),
+            tokenPresent: Boolean(savedSession) || services.storage.hasStoredSession(),
             serverOrigin: diagnosticOrigin(savedSession?.serverUrl ?? requestedServer),
             userIdSuffix: diagnosticIdSuffix(savedSession?.userId),
             ...details
           });
           let serverUrl: string;
 
-          recordRestore('STORAGE_READ', savedSession ? 'pending' : 'no-session');
           dispatch({ type: 'set_startup', startupInProgress: true, startupMessage: 'Restoring saved session' });
           setRouteSafe(dispatch, 'startup');
           dispatch({ type: 'set_recent_servers', recentServers: stored.recentServers });
+
+          recordRestore('STORAGE_READ', services.storage.hasStoredSession() ? 'pending' : 'no-session');
+          try {
+            savedSession = await services.storage.restoreSession({
+              signal: authLease.signal,
+              isCurrent
+            });
+          } catch (error) {
+            if (!isCurrent()) return;
+            if (error instanceof InvalidLocalSessionError) {
+              try {
+                services.storage.armSessionClearBarrier();
+                services.jellyfin.reset();
+                dispatch({ type: 'set_user_session', userSession: null });
+                await services.storage.completePendingSessionClear();
+              } catch (storageError) {
+                if (!isCurrent()) return;
+                recordRestore('INVALID_LOCAL_SESSION_CLEAR_FAILED', 'failed', {
+                  result: 'secure-storage-failure',
+                  sessionRetained: services.storage.hasStoredSession()
+                });
+                finalize('auth', 'Invalid session cleanup failed', 'SECURE_STORAGE_FAILURE');
+                services.auth.failStorage(authLease);
+                services.diagnostics.logError(
+                  'Invalid local session could not be removed',
+                  storageError,
+                  true
+                );
+                return;
+              }
+
+              if (!isCurrent()) return;
+              recordRestore('INVALID_LOCAL_SESSION_CLEARED', 'complete', {
+                result: 'invalid-local-session',
+                sessionRetained: false,
+                targetRoute: 'auth'
+              });
+              finalize('auth', 'Stored session was invalid. Sign in again.');
+              services.auth.completeUnauthenticated(authLease);
+              return;
+            }
+
+            services.jellyfin.reset();
+            dispatch({ type: 'set_user_session', userSession: null });
+            recordRestore('STORAGE_READ_FAILED', 'failed', {
+              result: 'secure-storage-failure',
+              sessionRetained: services.storage.hasStoredSession()
+            });
+            finalize('auth', 'Protected session could not be restored', 'SECURE_STORAGE_FAILURE');
+            services.auth.failStorage(authLease);
+            return;
+          }
+
+          if (!isCurrent()) return;
+          stored = services.storage.getState();
+          requestedServer = savedSession?.serverUrl
+            || services.storage.getStoredSessionServerUrl()
+            || stored.lastServerUrl
+            || PTV_PRODUCTION_SERVER_URL;
 
           try {
             serverUrl = normalizeServerUrl(requestedServer);
           } catch (error) {
             recordRestore('SERVER_URL_INVALID', 'failed', { retryable: false });
             finalize('server', 'Stored server URL is not valid', error instanceof Error ? error.message : 'Server URL is invalid');
+            services.auth.completeUnauthenticated(authLease);
             return;
           }
 
@@ -286,10 +356,11 @@ function StartupCoordinator() {
           try {
             setStartup('Validating server');
             recordRestore('SERVER_VALIDATION_STARTED', 'pending');
-            identity = await client.validateServer(10_000, {}, signal);
+            identity = await client.validateServer(10_000, {}, authLease.signal);
           } catch (error) {
             if (!isCurrent()) return;
             const issue = normalizePtvError(error);
+            services.jellyfin.reset();
             dispatch({ type: 'set_server_session', serverSession: null });
             recordRestore('SERVER_VALIDATION_FAILED', savedSession ? 'retryable-failure' : 'failed', {
               httpStatus: issue.code ?? null,
@@ -302,6 +373,7 @@ function StartupCoordinator() {
               savedSession ? 'Saved session could not reach the server' : 'Unable to reach server',
               issue.message
             );
+            services.auth.failConnectivity(authLease);
             return;
           }
 
@@ -330,30 +402,113 @@ function StartupCoordinator() {
               usersMeResult: 'not-requested'
             });
             finalize('auth', 'Sign in required');
+            services.auth.completeUnauthenticated(authLease);
             return;
           }
 
+          const rejectStoredSession = async (issue: PtvError, result: string) => {
+            if (!isCurrent()) return;
+            services.auth.rejectRestoredCredential(authLease);
+            try {
+              services.storage.armSessionClearBarrier();
+            } catch (storageError) {
+              services.jellyfin.reset();
+              dispatch({ type: 'set_user_session', userSession: null });
+              recordRestore('SESSION_REJECTION_CLEAR_FAILED', 'failed', {
+                result: 'secure-storage-failure',
+                sessionRetained: true
+              });
+              finalize('auth', 'Secure session cleanup failed', 'SECURE_STORAGE_FAILURE');
+              services.auth.failStorage(authLease);
+              services.diagnostics.logError('Rejected session cleanup barrier failed', storageError, true);
+              return;
+            }
+
+            services.jellyfin.reset();
+            dispatch({ type: 'set_user_session', userSession: null });
+            try {
+              await services.storage.completePendingSessionClear();
+            } catch (storageError) {
+              if (!isCurrent()) return;
+              recordRestore('SESSION_REJECTION_CLEAR_FAILED', 'failed', {
+                result: 'secure-storage-failure',
+                sessionRetained: false
+              });
+              finalize('auth', 'Secure session cleanup failed', 'SECURE_STORAGE_FAILURE');
+              services.auth.failStorage(authLease);
+              services.diagnostics.logError('Rejected session could not be removed', storageError, true);
+              return;
+            }
+
+            if (!isCurrent()) return;
+            recordRestore('SESSION_REJECTED', 'rejected', {
+              apiContextConfigured: false,
+              usersMeResult: result,
+              usersMeHttpStatus: issue.code ?? null,
+              sessionRetained: false,
+              targetRoute: 'auth'
+            });
+            finalize('auth', 'Session expired', 'Your saved session was rejected. Sign in again.');
+            services.auth.completeUnauthenticated(authLease);
+          };
+
+          if (savedSession.serverId !== identity.ServerId) {
+            await rejectStoredSession(
+              toPtvError('Saved session belongs to a different server', 'authentication-failed'),
+              'server-identity-mismatch'
+            );
+            return;
+          }
+
+          if (!services.auth.markValidating(authLease)) return;
+          services.jellyfin.setAuthenticatedRequestContextProvider(undefined);
           services.jellyfin.configureSession(serverUrl, savedSession.accessToken);
           recordRestore('API_CONTEXT_CONFIGURED', 'pending', { apiContextConfigured: true });
           try {
             setStartup('Validating saved user');
             recordRestore('USERS_ME_STARTED', 'pending', { apiContextConfigured: true });
-            const profile = await client.validateSession(savedSession.userId, 8_000, signal);
-            if (profile.Id !== savedSession.userId || (profile.Name && profile.Name !== savedSession.userName)) {
-              throw toPtvError('Saved session returned the wrong user', 'invalid-server-response');
+            const profile = await client.validateSession(savedSession.userId, 8_000, authLease.signal);
+            if (profile.Id !== savedSession.userId) {
+              await rejectStoredSession(
+                toPtvError('Saved session returned the wrong user', 'authentication-failed'),
+                'user-identity-mismatch'
+              );
+              return;
             }
             if (!isCurrent()) return;
 
+            const restoredUserName = typeof profile.Name === 'string' && profile.Name.trim()
+              ? profile.Name
+              : savedSession.userName;
+            if (restoredUserName !== savedSession.userName) {
+              try {
+                services.storage.updateSessionMetadata({ userName: restoredUserName });
+              } catch (error) {
+                services.diagnostics.logWarn('Restored user metadata persistence failed', error);
+              }
+            }
             const userSession: PtvUserSession = {
               userId: savedSession.userId,
-              userName: typeof profile.Name === 'string' && profile.Name.trim() ? profile.Name : savedSession.userName,
-              accessToken: savedSession.accessToken,
+              userName: restoredUserName,
               serverId: identity.ServerId,
               serverUrl,
               deviceId: savedSession.deviceId,
               createdAt: savedSession.savedAt,
               updatedAt: Date.now()
             };
+
+            const ticket = services.auth.commitAuthenticated(authLease);
+            if (!ticket) return;
+            const requestContext = services.auth.captureAuthenticatedRequest();
+            if (!requestContext || requestContext.ticket !== ticket || !isStartupCurrent()) return;
+            committedRequestIsCurrent = requestContext.isCurrent;
+            try {
+              services.activateAuthenticatedRequestContext(ticket);
+            } catch (error) {
+              services.diagnostics.logError('Authenticated transport activation failed', error, true);
+              await services.logout('auth');
+              return;
+            }
             dispatch({ type: 'set_user_session', userSession, userName: userSession.userName });
             recordRestore('COMPLETE', 'success', {
               apiContextConfigured: true,
@@ -367,24 +522,12 @@ function StartupCoordinator() {
           } catch (error) {
             if (!isCurrent()) return;
             const issue = normalizePtvError(error);
-            services.jellyfin.clearAuthorization();
-            dispatch({ type: 'set_user_session', userSession: null });
             if (isRejectedSession(issue)) {
-              try {
-                services.storage.clearSession();
-              } catch (storageError) {
-                services.diagnostics.logError('Rejected session could not be removed', storageError, true);
-              }
-              recordRestore('SESSION_REJECTED', 'rejected', {
-                apiContextConfigured: false,
-                usersMeResult: issue.kind,
-                usersMeHttpStatus: issue.code ?? null,
-                sessionRetained: false,
-                targetRoute: 'auth'
-              });
-              finalize('auth', 'Session expired', 'Your saved session was rejected. Sign in again.');
+              await rejectStoredSession(issue, issue.kind);
               return;
             }
+            services.jellyfin.reset();
+            dispatch({ type: 'set_user_session', userSession: null });
             recordRestore('USERS_ME_FAILED', 'retryable-failure', {
               apiContextConfigured: false,
               usersMeResult: issue.kind,
@@ -394,6 +537,7 @@ function StartupCoordinator() {
               targetRoute: 'auth'
             });
             finalize('auth', 'Saved session could not be validated', issue.message);
+            services.auth.failConnectivity(authLease);
           }
         };
 
@@ -411,21 +555,32 @@ function StartupCoordinator() {
           });
           setRouteSafe(dispatch, 'server');
           dispatch({ type: 'set_bootstrap_complete' });
+          if (authLease.isCurrent()) {
+            const code = error && typeof error === 'object' && 'code' in error
+              ? String((error as { code?: unknown }).code)
+              : '';
+            if (code === 'SECURE_STORAGE_FAILURE') services.auth.failStorage(authLease);
+            else services.auth.failConnectivity(authLease);
+          }
+        } finally {
+          signal.removeEventListener('abort', cancelRestore);
         }
       }
     );
 
     return lease.release;
-  }, [dispatch, services.diagnostics, services.jellyfin, services.startupRestore, services.storage, state.bootstrapRetryNonce]);
+  }, [dispatch, services, state.bootstrapRetryNonce]);
 
   useEffect(() => {
     if (!state.userSession || !state.serverUrl) return;
     const controller = new AbortController();
+    const authenticated = services.auth.captureAuthenticatedRequest();
+    if (!authenticated) return;
     void services.jellyfin
-      .configureSession(state.serverUrl, state.userSession.accessToken)
+      .getAuthenticatedClient()
       .discoverCapabilities(8_000, controller.signal)
       .then(capabilities => {
-        if (!controller.signal.aborted) {
+        if (!controller.signal.aborted && authenticated.isCurrent()) {
           dispatch({ type: 'set_capabilities', capabilities, ptvCapabilities: [] });
         }
       })
@@ -434,7 +589,20 @@ function StartupCoordinator() {
         if (issue.kind !== 'cancelled-request') services.diagnostics.logWarn('Capability discovery failed', issue);
       });
     return () => controller.abort('capability-route-hidden');
-  }, [dispatch, services.diagnostics, services.jellyfin, state.serverUrl, state.userSession]);
+  }, [dispatch, services.auth, services.diagnostics, services.jellyfin, state.serverUrl, state.userSession]);
+
+  useEffect(() => attachAuthenticatedResourceErrorBridge({
+    getCurrentSession: () => {
+      if (!state.userSession) return null;
+      const context = services.auth.captureAuthenticatedRequest();
+      if (!context) return null;
+      return {
+        userId: state.userSession.userId,
+        credentialEpoch: context.ticket.credentialEpoch
+      };
+    },
+    getAuthenticatedClient: () => services.jellyfin.getAuthenticatedClient()
+  }), [services.auth, services.jellyfin, state.userSession]);
 
   const handleBack = () => {
     const currentRoute = toRouteString(state.route);

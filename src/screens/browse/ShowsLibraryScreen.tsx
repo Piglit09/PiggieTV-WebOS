@@ -152,7 +152,7 @@ export function ShowsLibraryScreen() {
 
   const client = React.useMemo(() => {
     if (!state.serverUrl || !userSession) return null;
-    return services.jellyfin.configureSession(state.serverUrl, userSession.accessToken);
+    return services.jellyfin.getAuthenticatedClient();
   }, [state.serverUrl, userSession, services.jellyfin]);
 
   const supportsAutomaticLoading = typeof window !== 'undefined'

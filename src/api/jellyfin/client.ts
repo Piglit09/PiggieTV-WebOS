@@ -1,4 +1,9 @@
-import { requestJson, type JellyfinAuthorizationContext, type RequestConfig } from '../http/http';
+import {
+  requestJson,
+  type AuthenticatedRequestContext,
+  type JellyfinAuthorizationContext,
+  type RequestConfig
+} from '../http/http';
 import type {
   PtvAuthenticateResponse,
   PtvPlaybackInfoResponse,
@@ -22,7 +27,10 @@ export interface JellyfinTransportConfig {
   accessToken?: string;
   deviceId: string;
   requestTracker?: RequestTracker;
+  authenticatedRequestContextProvider?: AuthenticatedRequestContextProvider;
 }
+
+export type AuthenticatedRequestContextProvider = () => AuthenticatedRequestContext | null;
 
 export interface PtvLibraryListResponse {
   Items: { Id: string; Name: string; CollectionType?: string | null; }[];
@@ -44,7 +52,10 @@ export interface PtvQuickConnectStateResponse {
   AppVersion: string;
 }
 
-type RequestExtras = Omit<Partial<RequestConfig>, 'method' | 'body' | 'timeoutMs' | 'signal'>;
+type RequestExtras = Omit<
+  Partial<RequestConfig>,
+  'method' | 'body' | 'timeoutMs' | 'signal' | 'authenticatedRequest'
+>;
 
 const EPISODE_FIELDS = 'Overview,ParentId';
 const JELLYFIN_ITEM_FIELDS = new Set([
@@ -106,6 +117,7 @@ const SEARCH_TIMEOUT_CACHE_TTL_MS = 15_000;
 const SEARCH_RESPONSE_CACHE_LIMIT = 64;
 const PLAYBACK_REPORT_TIMEOUT_MS = 8_000;
 const PLAYBACK_PROGRESS_RETRY_DELAY_MS = 250;
+const SESSION_LOGOUT_TIMEOUT_MS = 5_000;
 
 type PlaybackReportPath =
   | 'Sessions/Playing'
@@ -212,6 +224,7 @@ export class JellyfinApiClient {
   private readonly deviceId: string;
   private headers: Record<string, string>;
   private readonly requestTracker?: RequestTracker;
+  private authenticatedRequestContextProvider?: AuthenticatedRequestContextProvider;
   private readonly requestCategory = 'jellyfin';
   private readonly searchResponseCache = new Map<string, SearchResponseCacheEntry>();
 
@@ -220,6 +233,7 @@ export class JellyfinApiClient {
     this.accessToken = config.accessToken;
     this.deviceId = config.deviceId;
     this.requestTracker = config.requestTracker;
+    this.authenticatedRequestContextProvider = config.authenticatedRequestContextProvider;
     this.headers = {
       'X-Application-Name': PTV_APPLICATION_NAME,
       'X-Application-Version': PTV_APPLICATION_VERSION,
@@ -230,6 +244,10 @@ export class JellyfinApiClient {
   public setAccessToken(token: string | undefined) {
     if (this.accessToken !== token) this.searchResponseCache.clear();
     this.accessToken = token;
+  }
+
+  public setAuthenticatedRequestContextProvider(provider?: AuthenticatedRequestContextProvider) {
+    this.authenticatedRequestContextProvider = provider;
   }
 
   public setServer(baseUrl: string) {
@@ -246,14 +264,36 @@ export class JellyfinApiClient {
     return this.deviceId;
   }
 
-  private getAuthorizationContext(): JellyfinAuthorizationContext {
+  private getAuthorizationContext(accessToken = this.accessToken): JellyfinAuthorizationContext {
     return {
-      accessToken: this.accessToken,
+      accessToken,
       clientName: PTV_APPLICATION_NAME,
       deviceName: PTV_DEVICE_NAME,
       deviceId: this.deviceId,
       applicationVersion: PTV_APPLICATION_VERSION
     };
+  }
+
+  private captureAuthenticatedRequestContext() {
+    if (!this.accessToken || !this.authenticatedRequestContextProvider) return undefined;
+    const context = this.authenticatedRequestContextProvider();
+    let isCurrent = false;
+    try {
+      isCurrent = Boolean(context?.isCurrent());
+    } catch {
+      isCurrent = false;
+    }
+    if (!context || context.signal.aborted || !isCurrent) {
+      throw toPtvError('Request was cancelled', 'cancelled-request');
+    }
+    return context;
+  }
+
+  private requireAccessToken() {
+    if (!this.accessToken) {
+      throw toPtvError('An authenticated Jellyfin session is required', 'authentication-failed');
+    }
+    return this.accessToken;
   }
 
   private withPath(path: string) {
@@ -294,6 +334,7 @@ export class JellyfinApiClient {
     signal?: AbortSignal,
     requestConfig: RequestExtras = {}
   ) {
+    const authenticatedRequest = this.captureAuthenticatedRequestContext();
     return requestJson<T>(this.withPath(path), {
       ...requestConfig,
       method: 'GET',
@@ -303,7 +344,8 @@ export class JellyfinApiClient {
       signal,
       requestTracker: requestConfig.requestTracker ?? this.requestTracker,
       requestCategory: requestConfig.requestCategory ?? this.requestCategory,
-      requestRoute: requestConfig.requestRoute ?? `GET ${path}`
+      requestRoute: requestConfig.requestRoute ?? `GET ${path}`,
+      ...(authenticatedRequest ? { authenticatedRequest } : {})
     }, this.getAuthorizationContext());
   }
 
@@ -315,6 +357,7 @@ export class JellyfinApiClient {
     requestCategory?: string,
     requestConfig: RequestExtras = {}
   ) {
+    const authenticatedRequest = this.captureAuthenticatedRequestContext();
     return requestJson<T>(this.withPath(path), {
       ...requestConfig,
       method: 'POST',
@@ -324,7 +367,8 @@ export class JellyfinApiClient {
       signal,
       requestTracker: requestConfig.requestTracker ?? this.requestTracker,
       requestCategory: requestConfig.requestCategory ?? requestCategory ?? this.requestCategory,
-      requestRoute: requestConfig.requestRoute ?? `POST ${path}`
+      requestRoute: requestConfig.requestRoute ?? `POST ${path}`,
+      ...(authenticatedRequest ? { authenticatedRequest } : {})
     }, this.getAuthorizationContext());
   }
 
@@ -968,6 +1012,50 @@ export class JellyfinApiClient {
     });
   }
 
+  /**
+   * Best-effort remote revocation for a credential whose local epoch has already
+   * been retired. It intentionally bypasses runtime-401 publication.
+   */
+  public logout(retiringAccessToken: string, timeoutMs = SESSION_LOGOUT_TIMEOUT_MS, signal?: AbortSignal) {
+    if (!retiringAccessToken.trim()) {
+      throw toPtvError('A retiring Jellyfin access token is required', 'authentication-failed');
+    }
+    return requestJson<Record<string, unknown>>(
+      this.withPath('Sessions/Logout'),
+      {
+        method: 'POST',
+        headers: this.headers,
+        timeoutMs,
+        signal,
+        retries: 0,
+        requestTracker: this.requestTracker,
+        requestCategory: 'authentication',
+        requestRoute: 'POST Sessions/Logout'
+      },
+      this.getAuthorizationContext(retiringAccessToken)
+    );
+  }
+
+  public resolvePlaybackStreamUrl(
+    itemId: string,
+    source: {
+      Id: string;
+      Container?: string | null;
+      DirectStreamUrl?: string | null;
+      TranscodingUrl?: string | null;
+    },
+    mode: 'direct-play' | 'direct-stream' | 'transcode'
+  ) {
+    return resolvePlaybackStreamUrl(
+      this.baseUrl,
+      itemId,
+      source,
+      mode,
+      this.requireAccessToken(),
+      this.deviceId
+    );
+  }
+
   public getImageUrl(
     itemId: string,
     imageType: 'Primary' | 'Backdrop' | 'Logo' | 'Thumb' | 'Poster',
@@ -1081,6 +1169,15 @@ export function resolvePlaybackStreamUrl(
   }
 
   const url = new URL(suppliedPath.trim(), serverRoot);
+  const trustedOrigin = new URL(serverRoot).origin;
+  if (
+    url.origin !== trustedOrigin ||
+    (url.protocol !== 'https:' && url.protocol !== 'http:') ||
+    url.username ||
+    url.password
+  ) {
+    throw new Error(`Jellyfin provided an untrusted ${mode} URL`);
+  }
   if (!url.searchParams.has('api_key') && !url.searchParams.has('token')) {
     url.searchParams.set('api_key', accessToken);
   }

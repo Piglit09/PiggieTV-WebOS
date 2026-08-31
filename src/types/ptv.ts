@@ -185,7 +185,6 @@ export interface PtvServerSession {
 export interface PtvUserSession {
   userId: string;
   userName: string;
-  accessToken: string;
   serverId: string;
   serverUrl: string;
   deviceId: string;

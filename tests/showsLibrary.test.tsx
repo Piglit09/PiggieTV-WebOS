@@ -13,6 +13,10 @@ import {
   writeBrowseWindow
 } from '../src/state/mediaCache';
 import { defaultStorageState, STORAGE_KEY } from '../src/storage/sessionStore';
+import {
+  InMemoryProtectedCredentialStoreForTests,
+  setCredentialStoreFactoryForTests
+} from '../src/storage/credentialStore';
 
 type Deferred<T> = {
   promise: Promise<T>;
@@ -44,13 +48,17 @@ const mockGetSimilarItems = vi.fn();
 const mockGetSeasons = vi.fn();
 const mockGetEpisodes = vi.fn();
 const mockSetAccessToken = vi.fn();
+const mockSetAuthenticatedRequestContextProvider = vi.fn();
 const observerRecords: ObserverRecord[] = [];
+let protectedCredentialStore = new InMemoryProtectedCredentialStoreForTests();
 
 vi.mock('../src/api/jellyfin/client', () => ({
   JellyfinApiClient: vi.fn((config: { baseUrl: string }) => {
     let baseUrl = config.baseUrl;
     return {
       setAccessToken: (token?: string) => mockSetAccessToken(token),
+      setAuthenticatedRequestContextProvider: (provider?: unknown) =>
+        mockSetAuthenticatedRequestContextProvider(provider),
       setServer: (next: string) => { baseUrl = next; },
       getServerUrl: () => baseUrl,
       validateServer: (...args: unknown[]) => mockValidateServer(...args),
@@ -134,6 +142,8 @@ function seedSession() {
   const now = Date.now();
   localStorage.setItem(STORAGE_KEY, JSON.stringify({
     ...defaultStorageState(),
+    // Reproduce the 0.1.15 plaintext envelope, not the current tokenless schema.
+    schemaVersion: 2,
     servers: [{
       serverId: 'server-demo',
       baseUrl: 'https://server.example.com',
@@ -238,6 +248,8 @@ async function openShows() {
 beforeEach(() => {
   observerRecords.length = 0;
   localStorage.clear();
+  protectedCredentialStore = new InMemoryProtectedCredentialStoreForTests();
+  setCredentialStoreFactoryForTests(() => protectedCredentialStore);
   for (const mock of [
     mockValidateServer,
     mockValidateSession,
@@ -250,7 +262,8 @@ beforeEach(() => {
     mockGetSimilarItems,
     mockGetSeasons,
     mockGetEpisodes,
-    mockSetAccessToken
+    mockSetAccessToken,
+    mockSetAuthenticatedRequestContextProvider
   ]) mock.mockReset();
 
   mockValidateServer.mockResolvedValue({
@@ -273,6 +286,7 @@ afterEach(() => {
   clearHomeCache();
   clearMediaCache();
   localStorage.clear();
+  setCredentialStoreFactoryForTests(null);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });

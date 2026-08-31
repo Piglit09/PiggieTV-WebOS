@@ -1,6 +1,6 @@
 {
   "name": "ptv-webos-native",
-  "version": "0.1.15",
+  "version": "0.1.18",
   "private": true,
   "type": "module",
   "description": "Native PiggieTV webOS TV client with direct Jellyfin API integration",

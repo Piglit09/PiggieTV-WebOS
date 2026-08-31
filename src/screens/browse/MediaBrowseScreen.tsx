@@ -49,7 +49,7 @@ export function MediaBrowseScreen({ screenId }: { screenId: BrowseScreenId }) {
   const config = BROWSE_CONFIG[screenId];
   const client = useMemo(() => {
     if (!state.serverUrl || !userSession) return null;
-    return services.jellyfin.configureSession(state.serverUrl, userSession.accessToken);
+    return services.jellyfin.getAuthenticatedClient();
   }, [state.serverUrl, userSession, services.jellyfin]);
 
   useEffect(() => {

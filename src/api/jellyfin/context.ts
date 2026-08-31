@@ -1,6 +1,14 @@
-import { JellyfinApiClient } from './client';
+import {
+  JellyfinApiClient,
+  type AuthenticatedRequestContextProvider
+} from './client';
 import { normalizeServerUrl } from './normalizeUrl';
 import type { RequestTracker } from '../../core/requestTracker';
+
+export interface RetiringJellyfinAuthorization {
+  readonly client: JellyfinApiClient;
+  readonly accessToken: string;
+}
 
 export class JellyfinClientContext {
   private client: JellyfinApiClient | null = null;
@@ -9,7 +17,8 @@ export class JellyfinClientContext {
 
   constructor(
     private readonly deviceId: string,
-    private readonly requestTracker?: RequestTracker
+    private readonly requestTracker?: RequestTracker,
+    private authenticatedRequestContextProvider?: AuthenticatedRequestContextProvider
   ) {}
 
   public configureServer(serverUrl: string) {
@@ -19,7 +28,8 @@ export class JellyfinClientContext {
         baseUrl: normalized,
         accessToken: this.accessToken ?? undefined,
         deviceId: this.deviceId,
-        requestTracker: this.requestTracker
+        requestTracker: this.requestTracker,
+        authenticatedRequestContextProvider: this.authenticatedRequestContextProvider
       });
     } else if (this.serverUrl !== normalized) {
       this.client.setServer(normalized);
@@ -31,6 +41,11 @@ export class JellyfinClientContext {
   public setAuthorization(accessToken: string | null) {
     this.accessToken = accessToken;
     this.client?.setAccessToken(accessToken ?? undefined);
+  }
+
+  public setAuthenticatedRequestContextProvider(provider?: AuthenticatedRequestContextProvider) {
+    this.authenticatedRequestContextProvider = provider;
+    this.client?.setAuthenticatedRequestContextProvider(provider);
   }
 
   public configureSession(serverUrl: string, accessToken: string) {
@@ -54,6 +69,26 @@ export class JellyfinClientContext {
       throw new Error('Jellyfin API client is not configured');
     }
     return this.client;
+  }
+
+  public getAuthenticatedClient() {
+    if (!this.accessToken) {
+      throw new Error('Jellyfin API client is not authorized');
+    }
+    return this.getClient();
+  }
+
+  /**
+   * Captures the in-memory authorization needed for centralized logout without
+   * changing client state. The caller must invalidate auth ownership first and
+   * reset this context after local credential destruction is durably guarded.
+   */
+  public captureRetiringAuthorization(): RetiringJellyfinAuthorization | null {
+    if (!this.client || !this.accessToken) return null;
+    return {
+      client: this.client,
+      accessToken: this.accessToken
+    };
   }
 
   public getServerUrl() {
