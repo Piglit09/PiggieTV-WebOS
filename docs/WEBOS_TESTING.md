@@ -64,22 +64,23 @@ Record command, exit code, and artifact path in the acceptance report. These ass
 
 ## Packaging and install flow
 
-1. Commit the candidate source, confirm the Git worktree is clean, run the automated validation gate, and retain the exact candidate package. `npm run package` refuses a dirty source tree and performs a production build before invoking the webOS packager; diagnostics embed the authoritative `appinfo.json` identity and committed Git revision.
-2. List configured aliases with `npm run webos:devices`. This wrapper deliberately omits credential and passphrase fields.
-3. Confirm the physical target with `npm run webos:device:info -- --device PiggieTV-LG`.
-4. Install the exact existing package with `npm run webos:install -- --device PiggieTV-LG`.
-5. Launch it with `npm run webos:launch -- --device PiggieTV-LG`.
-6. Route to Web Inspector Console with `npm run webos:logs -- --device PiggieTV-LG` while running the checklist.
+1. Confirm the operator-controlled workspace policy is provisioned and the target has a separate, exact deployment approval and verified rollback. Without that policy, build, package, and device mutation commands fail closed.
+2. Commit the candidate source, confirm the Git worktree is clean, run the automated validation gate, and retain the exact candidate package. `npm run package` refuses a dirty source tree and performs a production build before invoking the webOS packager. The package sidecar manifest records the authoritative `appinfo.json` identity, committed Git revision, complete staged file hashes, and final IPK hash.
+3. List configured aliases with `npm run webos:devices`. This wrapper deliberately omits credential and passphrase fields.
+4. Confirm the physical target with `npm run webos:device:info -- --device PiggieTV-LG`.
+5. Install the exact approved package with `npm run webos:install -- --device PiggieTV-LG --approval <approval-id> --rollback <verified-reference>`.
+6. Launch it with `npm run webos:launch -- --device PiggieTV-LG --approval <approval-id> --rollback <verified-reference>`.
+7. Route to Web Inspector Console with `npm run webos:logs -- --device PiggieTV-LG` while running the checklist.
 
 The current local mapping is `PiggieTV-LG` to `10.16.0.231:9922`; the alias, rather than the IP address, is passed to `--device`. An explicit `--device` value takes precedence over the optional `PTV_WEBOS_TEST_DEVICE` fallback. Do not use or paste raw `ares-setup-device --list` output because the installed CLI includes the Developer Mode passphrase column. Do not commit credentials, developer-mode keys, passwords, access tokens, or Quick Connect secrets.
 
-The Node helpers do not load `.env`. Export `PTV_WEBOS_TEST_DEVICE` in the active shell or use the explicit `--device` form shown above. Hosted mode builds and serves only `dist/.ptv-webos-hosted`; pass the workstation address reachable by the TV with `--host-ip <ip>` or `PTV_WEBOS_HOST_IP`.
+The Node helpers do not load `.env`. Export `PTV_WEBOS_TEST_DEVICE` in the active shell or use the explicit `--device` form shown above. Hosted mode launches only the already packaged and verified `dist/.ptv-webos-package` directory; it does not build or create separate hosted files. Use a separately approved hosted operation and pass the workstation address reachable by the TV with `--host-ip <ip>` or `PTV_WEBOS_HOST_IP`.
 
 Close and relaunch without relying on the CLI's default device:
 
 ```powershell
-npm run webos:close -- --device PiggieTV-LG
-npm run webos:launch -- --device PiggieTV-LG
+npm run webos:close -- --device PiggieTV-LG --approval <approval-id> --rollback <verified-reference>
+npm run webos:launch -- --device PiggieTV-LG --approval <approval-id> --rollback <verified-reference>
 ```
 
 The removed `webos:install:release` command passed an undocumented `--force` flag. Use the normal install command above for both first installation and updates.

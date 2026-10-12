@@ -1,5 +1,8 @@
 import { createRequire } from 'node:module';
 import { EventEmitter } from 'node:events';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 const require = createRequire(import.meta.url);
@@ -87,6 +90,20 @@ describe('webOS host health classifier', () => {
       platform: 'linux',
       execute: () => 'log 12345678-1234-1234-1234-123456789abc embedded\n'
     })).toMatchObject({ status: 'UNKNOWN' });
+  });
+
+  it('uses the fixed system PowerShell for a pinned health probe despite a spoofed SystemRoot', () => {
+    const sdk = mkdtempSync(join(tmpdir(), 'ptv-webos-health-sdk-'));
+    try {
+      writeFileSync(join(sdk, 'ares-novacom.ps1'), 'fixture script');
+      const execute = vi.fn(() => '12345678-1234-1234-1234-123456789abc\n');
+      health.defaultProbeBootId('fixture-tv', {
+        platform: 'win32', cliDirectory: sdk, env: { SystemRoot: 'C:\\attacker' }, execute
+      });
+      expect(execute.mock.calls[0][0]).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
+    } finally {
+      rmSync(sdk, { recursive: true, force: true });
+    }
   });
 
   it('sanitizes heartbeat state and fingerprints media-bearing focus ids', () => {

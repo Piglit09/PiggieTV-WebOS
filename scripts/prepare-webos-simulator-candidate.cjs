@@ -33,6 +33,7 @@ function listFiles(directory, prefix = '') {
 }
 
 function prepareCandidate() {
+  require('./ptv-workspace-preflight.cjs').assertWorkspaceAuthority('build', { cwd: root });
   const requestedOutput = readArgument('--output');
   if (!requestedOutput) {
     throw new Error('--output is required.');

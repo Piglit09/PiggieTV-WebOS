@@ -17,6 +17,8 @@ const common = require('../scripts/webos-common.cjs') as {
   requireDeviceAlias: (args?: string[], env?: Record<string, string>) => string;
   requireHostIp: (args?: string[], env?: Record<string, string>) => string;
   runWebOsCli: (command: string, args: string[]) => unknown;
+  resolvePinnedCliScript: (command: string, directory: string) => string;
+  systemPowerShellPath: (env?: Record<string, string>) => string;
 };
 const inspector = require('../scripts/webos-inspect.cjs') as {
   buildInspectorArgs: (args?: string[], env?: Record<string, string>, root?: string) => string[];
@@ -121,6 +123,10 @@ describe('webOS helper safety', () => {
     )).toBe('cli-tv');
   });
 
+  it('requires an explicit device instead of silently choosing the configured TV', () => {
+    expect(() => common.requireDeviceAlias([], {})).toThrow('Missing explicit device alias');
+  });
+
   it('rejects shell metacharacters before constructing CLI arguments', () => {
     expect(() => common.requireDeviceAlias(['--device', 'tv&whoami'], {})).toThrow(
       'unsupported characters'
@@ -135,6 +141,22 @@ describe('webOS helper safety', () => {
 
   it('accepts a literal workstation IP for hosted mode', () => {
     expect(common.requireHostIp(['--host-ip', '10.16.0.125'], {})).toBe('10.16.0.125');
+  });
+
+  it('resolves the deployment CLI only inside the approved SDK directory', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ptv-sdk-cli-'));
+    try {
+      writeFileSync(join(root, 'ares-install.ps1'), 'fixture');
+      expect(common.resolvePinnedCliScript('ares-install', root)).toBe(join(root, 'ares-install.ps1'));
+      expect(() => common.resolvePinnedCliScript('ares-launch', root)).toThrow(/approved|SDK|CLI/i);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('never selects a PowerShell executable from caller-controlled SystemRoot', () => {
+    expect(common.systemPowerShellPath({ SystemRoot: 'C:\\attacker' }))
+      .toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
   });
 
   it('prints only alias and endpoint from device-list output', () => {

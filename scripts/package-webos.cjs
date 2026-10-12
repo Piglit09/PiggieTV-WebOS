@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { copyValidatedBuildAssets, readAppInfo, runWebOsCli } = require('./webos-common.cjs');
+const { assertWorkspaceAuthority } = require('./ptv-workspace-preflight.cjs');
 
 const root = process.cwd();
 const stagingDir = path.join(root, 'dist', '.ptv-webos-package');
@@ -47,7 +48,14 @@ function assertCleanWorktree() {
 }
 
 function run() {
+  const authority = assertWorkspaceAuthority('package', {
+    cwd: root,
+    plannedStagingDir: stagingDir,
+    plannedOutputDir: outputDir
+  });
   assertCleanWorktree();
+  const { verifyBuildManifest } = require('./ptv-build-manifest.cjs');
+  verifyBuildManifest({ sourceRoot: root, buildDir: path.join(root, 'build'), requireClean: true });
   removePath(stagingDir);
   fs.mkdirSync(stagingDir, { recursive: true });
   removePath(outputDir);
@@ -83,7 +91,9 @@ function run() {
 
   fs.writeFileSync(stagingIndexPath, stagingIndexHtml);
 
-  runWebOsCli('ares-package', [stagingDir, '-o', outputDir], { stdio: 'inherit' });
+  runWebOsCli('ares-package', [stagingDir, '-o', outputDir], {
+    stdio: 'inherit', cliDirectory: authority.sdkCliDirectory
+  });
 
   const files = fs.readdirSync(outputDir).filter((entry) => entry.toLowerCase().endsWith('.ipk'));
   if (files.length !== 1) {
@@ -97,6 +107,13 @@ function run() {
   if (!fs.existsSync(expected)) {
     throw new Error(`Expected package not found at ${expected}`);
   }
+  const { createArtifactManifest, verifyArtifactManifest } = require('./ptv-artifact-manifest.cjs');
+  const manifestPath = `${expected}.manifest.json`;
+  createArtifactManifest({ sourceRoot: root, stagingDir, artifactPath: expected, manifestPath });
+  verifyArtifactManifest(manifestPath, { sourceRoot: root, artifactPath: expected });
+  assertWorkspaceAuthority('package', {
+    cwd: root, artifactPath: expected, manifestPath
+  });
 }
 
 if (require.main === module) {

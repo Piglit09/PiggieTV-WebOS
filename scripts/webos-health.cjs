@@ -13,8 +13,11 @@ const {
   readAppInfo,
   readCliOption,
   requireDeviceAlias,
-  runWebOsCli
+  resolvePinnedCliScript,
+  runWebOsCli,
+  systemPowerShellPath
 } = require('./webos-common.cjs');
+const { assertWorkspaceAuthority } = require('./ptv-workspace-preflight.cjs');
 
 const YES = 'YES';
 const NO = 'NO';
@@ -201,12 +204,13 @@ function defaultProbeTcp(host, port, timeoutMs = NETWORK_TIMEOUT_MS) {
   });
 }
 
-function fixedCliInvocation(command, args, env = process.env, platform = process.platform) {
+function fixedCliInvocation(command, args, env = process.env, platform = process.platform, cliDirectory = null) {
   if (platform !== 'win32') return { file: command, args };
-  const script = findPowerShellCliScript(command, env);
-  const systemRoot = env.SystemRoot || process.env.SystemRoot || 'C:\\Windows';
+  const script = cliDirectory
+    ? resolvePinnedCliScript(command, cliDirectory)
+    : findPowerShellCliScript(command, env);
   return {
-    file: path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    file: systemPowerShellPath(),
     args: [
       '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
       '-File', script, ...args
@@ -216,7 +220,11 @@ function fixedCliInvocation(command, args, env = process.env, platform = process
 
 function fixedInspectorInvocation(args, env = process.env, platform = process.platform, options = {}) {
   if (platform !== 'win32') return { file: 'ares-inspect', args };
-  const findScript = options.findCliScript ?? findPowerShellCliScript;
+  const findScript = options.findCliScript ?? (
+    options.cliDirectory
+      ? command => resolvePinnedCliScript(command, options.cliDirectory)
+      : findPowerShellCliScript
+  );
   const isFile = options.isFile ?? (candidate => {
     try {
       return fs.statSync(candidate).isFile();
@@ -250,7 +258,8 @@ function defaultProbeBootId(device, options = {}) {
       'ares-novacom',
       ['--run', BOOT_ID_COMMAND, '-d', device],
       options.env,
-      options.platform
+      options.platform,
+      options.cliDirectory
     );
     const output = execute(invocation.file, invocation.args, {
       encoding: 'utf8',
@@ -520,17 +529,21 @@ async function collectHealth(options = {}) {
   const appId = readAppInfo(root).id;
   const baselineBootFingerprint = options.baselineBootFingerprint
     ?? readBaselineBootFingerprint(args);
-  const executeCli = options.executeCli ?? runWebOsCli;
-  let endpoint = null;
-  try {
-    const deviceList = executeCli('ares-setup-device', ['--list'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: CLI_TIMEOUT_MS
-    });
-    endpoint = parseDeviceEndpoint(deviceList, device);
-  } catch {
-    // An unavailable device list is represented by UNKNOWN signals below.
+  const executeCli = options.executeCli ?? ((command, cliArgs, cliOptions) => runWebOsCli(
+    command, cliArgs, { ...cliOptions, cliDirectory: options.cliDirectory }
+  ));
+  let endpoint = options.approvedEndpoint ?? null;
+  if (!endpoint) {
+    try {
+      const deviceList = executeCli('ares-setup-device', ['--list'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: CLI_TIMEOUT_MS
+      });
+      endpoint = parseDeviceEndpoint(deviceList, device);
+    } catch {
+      // An unavailable device list is represented by UNKNOWN signals below.
+    }
   }
 
   let ping = signal(UNKNOWN, 'device endpoint unavailable');
@@ -624,7 +637,12 @@ function formatHealthReport(report) {
 
 async function main() {
   try {
-    const report = await collectHealth();
+    const device = requireDeviceAlias();
+    const authority = assertWorkspaceAuthority('inspect-device', { cwd: process.cwd(), targetId: device });
+    const report = await collectHealth({
+      approvedEndpoint: authority.endpoint,
+      cliDirectory: authority.sdkCliDirectory
+    });
     if (process.argv.slice(2).includes('--json')) {
       console.log(JSON.stringify(report, null, 2).replace(/https?:\/\/[^\s"\\]+/gi, '[suppressed inspector URL]'));
     } else {

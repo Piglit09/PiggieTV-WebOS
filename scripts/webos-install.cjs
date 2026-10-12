@@ -2,7 +2,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const { readAppInfo, requireDeviceAlias, runWebOsCli } = require('./webos-common.cjs');
+const { readAppInfo, readCliOption, requireDeviceAlias, runWebOsCli } = require('./webos-common.cjs');
+const { assertWorkspaceAuthority } = require('./ptv-workspace-preflight.cjs');
 
 function findPackagePath() {
   const root = process.cwd();
@@ -45,7 +46,18 @@ if (args.includes('--force')) {
 try {
   const device = requireDeviceAlias();
   const packagePath = findPackagePath();
-  runWebOsCli('ares-install', [packagePath, '-d', device], { stdio: 'inherit' });
+  const authority = assertWorkspaceAuthority('deploy', {
+    cwd: process.cwd(),
+    targetId: device,
+    operation: 'install',
+    artifactPath: packagePath,
+    manifestPath: `${packagePath}.manifest.json`,
+    approvalId: readCliOption(args, ['--approval'], '--approval'),
+    rollbackReference: readCliOption(args, ['--rollback'], '--rollback')
+  });
+  runWebOsCli('ares-install', [packagePath, '-d', device], {
+    stdio: 'inherit', cliDirectory: authority.sdkCliDirectory
+  });
 } catch (error) {
   console.error(error instanceof Error ? error.message : 'webOS installation failed.');
   process.exitCode = 1;
