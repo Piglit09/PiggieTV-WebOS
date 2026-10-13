@@ -90,6 +90,8 @@ export interface PlaybackResolvedSource {
   requestedOutputContainer?: string | null;
   requestedOutputVideoCodec?: string | null;
   requestedOutputAudioCodec?: string | null;
+  audioStreamIndex?: number | null;
+  subtitleStreamIndex?: number | null;
 }
 
 export interface PlaybackResolveContext {
@@ -102,6 +104,10 @@ export interface PlaybackReport {
   itemId: string;
   playSessionId: string | null;
   mediaSourceId: string | null;
+  playMethod: 'DirectPlay' | 'DirectStream' | 'Transcode' | null;
+  canSeek: boolean;
+  audioStreamIndex: number | null;
+  subtitleStreamIndex: number | null;
   positionSeconds: number;
   positionTicks: number;
   isPaused: boolean;
@@ -235,6 +241,7 @@ interface MutablePlaybackDiagnostics {
 
 interface ActivePlaybackAttempt {
   id: string;
+  operationId: string;
   request: PlaybackStartRequest;
   controller: AbortController;
   resolvedSource: PlaybackResolvedSource | null;
@@ -277,6 +284,18 @@ const PASSIVE_MEDIA_EVENTS = [
   'waitingforkey'
 ] as const;
 let attemptSequence = 0;
+
+function createOperationId(request: PlaybackStartRequest) {
+  const startPositionSeconds = request.startPositionSeconds;
+  const startKey = typeof startPositionSeconds === 'number' ? Math.max(0, startPositionSeconds).toFixed(2) : 'resume';
+  return `${request.itemId}@${startKey}`;
+}
+
+function isNetworkError(error: unknown) {
+  return error instanceof TypeError
+    || (error instanceof DOMException && error.name === 'NetworkError')
+    || error === 'NETWORK_ERR';
+}
 
 function createDefaultAttemptId() {
   attemptSequence += 1;
@@ -515,7 +534,14 @@ export class PlaybackEngine {
     if (!this.media) throw new Error('A video element must be attached before playback starts');
 
     this.attachMediaListeners();
+    const operationId = createOperationId(request);
+    if (this.isDuplicateInitializationInProgress(operationId)) {
+      if (this.activeAttempt) {
+        return { attemptId: this.activeAttempt.id, status: 'cancelled' };
+      }
+    }
     this.supersedeCurrentAttempt();
+    this.recordPlaybackLifecycle('PLAY_INIT', { requestItemId: request.itemId, operationId });
 
     const attemptId = (this.dependencies.createAttemptId ?? createDefaultAttemptId)();
     const metrics = emptyDiagnostics();
@@ -523,6 +549,7 @@ export class PlaybackEngine {
     metrics.itemIdSuffix = idSuffix(request.itemId);
     const attempt: ActivePlaybackAttempt = {
       id: attemptId,
+      operationId,
       request,
       controller: new AbortController(),
       resolvedSource: null,
@@ -539,9 +566,19 @@ export class PlaybackEngine {
     try {
       const resolver = this.dependencies.resolveSource;
       if (!resolver) throw new Error('No playback source resolver was configured');
+      this.recordPlaybackLifecycle('PLAYBACKINFO_REQUEST', {
+        attemptId,
+        operationId,
+        requestItemId: request.itemId
+      });
       const resolved = await resolver(request, {
         attemptId,
         signal: attempt.controller.signal
+      });
+      this.recordPlaybackLifecycle('PLAYBACKINFO_RESPONSE', {
+        attemptId,
+        operationId,
+        requestItemId: request.itemId
       });
       if (!this.isActive(attempt)) return { attemptId, status: 'cancelled' };
       if (!resolved || typeof resolved.url !== 'string' || !resolved.url.trim()) {
@@ -550,8 +587,21 @@ export class PlaybackEngine {
 
       attempt.resolvedSource = resolved;
       this.updateResolvedDiagnostics(attempt, resolved);
+      this.recordPlaybackLifecycle('SOURCE_SELECTED', {
+        attemptId,
+        operationId,
+        requestItemId: request.itemId,
+        source: resolved.url
+      });
       this.transition('loading');
       this.assignSource(resolved.url);
+      this.recordPlaybackLifecycle('VIDEO_SRC_SET', {
+        attemptId,
+        operationId,
+        requestItemId: request.itemId,
+        source: resolved.url
+      });
+      this.recordPlaybackLifecycle('VIDEO_LOAD', { attemptId, operationId, requestItemId: request.itemId });
       await this.waitForReadiness(attempt);
       if (!this.isActive(attempt)) return { attemptId, status: 'cancelled' };
 
@@ -562,6 +612,12 @@ export class PlaybackEngine {
       }
 
       const started = await this.invokePlay(attempt);
+      this.recordPlaybackLifecycle('VIDEO_PLAY_RESOLVED', {
+        attemptId,
+        operationId,
+        requestItemId: request.itemId,
+        started
+      });
       if (!started || !this.isActive(attempt)) return { attemptId, status: 'cancelled' };
       attempt.hasStarted = true;
       this.transition('playing');
@@ -572,6 +628,11 @@ export class PlaybackEngine {
       if (this.isExpectedCancellation(error, attempt)) {
         return { attemptId, status: 'cancelled' };
       }
+      this.recordPlaybackLifecycle('PLAY_INIT_FAILED', {
+        attemptId,
+        operationId,
+        errorKind: isNetworkError(error) ? 'network' : ((error as Error)?.name ?? 'Error')
+      });
       this.handleFatalError(error, attempt);
       throw error;
     } finally {
@@ -584,7 +645,19 @@ export class PlaybackEngine {
     const attempt = this.activeAttempt;
     if (!attempt || !this.isActive(attempt) || this.state === 'ended' || this.state === 'error') return;
     try {
+      const request = this.activeAttempt?.request;
+      this.recordPlaybackLifecycle('VIDEO_PLAY', {
+        attemptId: this.activeAttempt?.id,
+        operationId: this.activeAttempt?.operationId,
+        requestItemId: request?.itemId
+      });
       const started = await this.invokePlay(attempt);
+      this.recordPlaybackLifecycle('VIDEO_PLAY_RESOLVED', {
+        attemptId: attempt?.id,
+        operationId: attempt?.operationId,
+        requestItemId: request?.itemId,
+        started
+      });
       if (!started) return;
       if (attempt) {
         const firstStart = !attempt.hasStarted;
@@ -758,6 +831,11 @@ export class PlaybackEngine {
   }
 
   private async invokePlay(attempt: ActivePlaybackAttempt | null) {
+    this.recordPlaybackLifecycle('VIDEO_PLAY', {
+      attemptId: attempt?.id,
+      operationId: attempt?.operationId,
+      requestItemId: attempt?.request.itemId
+    });
     const media = this.media;
     if (!media) return false;
     if (attempt && !this.isActive(attempt)) return false;
@@ -772,23 +850,71 @@ export class PlaybackEngine {
       if (attempt && !this.isActive(attempt)) {
         metrics.lastPlayPromiseResult = 'cancelled';
         if (this.metrics === metrics) this.emitDiagnostics();
+        this.recordPlaybackLifecycle('VIDEO_PLAY_RESOLVED', {
+          attemptId: attempt.id,
+          operationId: attempt.operationId,
+          requestItemId: attempt.request.itemId,
+          started: false,
+          cancelled: true
+        });
         return false;
       }
       metrics.lastPlayPromiseResult = 'fulfilled';
       if (this.metrics === metrics) this.emitDiagnostics();
+      this.recordPlaybackLifecycle('VIDEO_PLAY_RESOLVED', {
+        attemptId: attempt?.id,
+        operationId: attempt?.operationId,
+        requestItemId: attempt?.request.itemId,
+        started: true
+      });
       return true;
     } catch (error) {
       if (attempt && this.isExpectedCancellation(error, attempt)) {
         metrics.lastPlayPromiseResult = 'cancelled';
         metrics.lastPlayPromiseError = null;
         if (this.metrics === metrics) this.emitDiagnostics();
+        this.recordPlaybackLifecycle('VIDEO_PLAY_RESOLVED', {
+          attemptId: attempt.id,
+          operationId: attempt.operationId,
+          requestItemId: attempt.request.itemId,
+          started: false,
+          cancelled: true
+        });
         return false;
       }
       metrics.lastPlayPromiseResult = 'rejected';
       metrics.lastPlayPromiseError = safeErrorMessage(error);
       if (this.metrics === metrics) this.emitDiagnostics();
+      this.recordPlaybackLifecycle('VIDEO_PLAY_RESOLVED', {
+        attemptId: attempt?.id,
+        operationId: attempt?.operationId,
+        requestItemId: attempt?.request.itemId,
+        started: false,
+        errorKind: (error as Error)?.name ?? 'Error'
+      });
       throw error;
     }
+  }
+
+  private recordPlaybackLifecycle(type: string, details: Record<string, unknown>) {
+    if (this.diagnostics) {
+      this.diagnostics.recordLifecycleEvent({
+        type,
+        at: Date.now(),
+        mediaElementState: this.media ? {
+          readyState: this.media.readyState,
+          networkState: this.media.networkState,
+          currentTime: safeMediaPosition(this.media.currentTime)
+        } : null,
+        ...details
+      });
+    }
+  }
+
+  private isDuplicateInitializationInProgress(operationId: string) {
+    if (!this.activeAttempt || !this.isActive(this.activeAttempt)) return false;
+    if (this.activeAttempt.operationId !== operationId) return false;
+    return this.state === 'resolving' || this.state === 'loading' || this.state === 'ready';
   }
 
   private supersedeCurrentAttempt() {
@@ -952,6 +1078,18 @@ export class PlaybackEngine {
     if (this.metrics === attempt.metrics) this.emitDiagnostics();
 
     const run = async () => {
+      if (kind === 'progress' && attempt.stoppedReportQueued) {
+        evidence.skipped.progress += 1;
+        evidence.last = {
+          kind,
+          status: 'skipped',
+          at: Date.now(),
+          reason: 'superseded-by-stopped-report'
+        };
+        if (this.metrics === attempt.metrics) this.emitDiagnostics();
+        return;
+      }
+
       evidence.attempted[kind] += 1;
       evidence.last = { kind, status: 'attempted', at: Date.now(), reason: null };
       if (this.metrics === attempt.metrics) this.emitDiagnostics();
@@ -997,6 +1135,16 @@ export class PlaybackEngine {
       itemId: attempt.request.itemId,
       playSessionId: attempt.resolvedSource?.playSessionId ?? null,
       mediaSourceId: attempt.resolvedSource?.mediaSourceId ?? null,
+      playMethod: attempt.resolvedSource?.mode === 'direct-play'
+        ? 'DirectPlay'
+        : attempt.resolvedSource?.mode === 'direct-stream'
+          ? 'DirectStream'
+          : attempt.resolvedSource?.mode === 'transcode'
+            ? 'Transcode'
+            : null,
+      canSeek: this.canSeek(),
+      audioStreamIndex: attempt.resolvedSource?.audioStreamIndex ?? null,
+      subtitleStreamIndex: attempt.resolvedSource?.subtitleStreamIndex ?? null,
       positionSeconds,
       positionTicks: secondsToTicks(positionSeconds),
       isPaused: media?.paused ?? true,

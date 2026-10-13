@@ -1,6 +1,6 @@
 {
   "name": "ptv-webos-native",
-  "version": "0.1.0",
+  "version": "0.1.15",
   "private": true,
   "type": "module",
   "description": "Native PiggieTV webOS TV client with direct Jellyfin API integration",
@@ -14,6 +14,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "vitest run tests/integration",
+    "version:bump": "node scripts/bump-version.cjs",
+    "version:check": "node scripts/bump-version.cjs --check && node scripts/bump-version.cjs --self-test",
     "package": "npm run build && node scripts/package-webos.cjs",
     "package:inspect": "node scripts/inspect-webos-package.cjs",
     "package:inspect:detail": "node scripts/inspect-webos-package.cjs --detail",
@@ -29,7 +31,9 @@
     "webos:close": "node scripts/webos-launch.cjs --close",
     "webos:logs": "node scripts/webos-logs.cjs",
     "webos:launch:hosted": "npm run build && node scripts/webos-launch-hosted.cjs",
-    "webos:inspect": "node scripts/webos-inspect.cjs"
+    "webos:inspect": "node scripts/webos-inspect.cjs",
+    "webos:health": "node scripts/webos-health.cjs",
+    "validate:webos:simulator": "node scripts/webos-simulator-validate.cjs"
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -50,6 +54,7 @@
     "jsdom": "^26.0.0",
     "typescript": "^5.8.2",
     "vite": "^6.0.4",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "ws": "^8.21.1"
   }
 }

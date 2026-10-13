@@ -96,6 +96,7 @@ describe('Phase 2 authenticated shell contract', () => {
     expect(screen.getByRole('heading', { name: 'PiggieTV' }).textContent).toBe('PiggieTV');
     expect(document.querySelector('.ptv-brand__logo')?.getAttribute('src')).toBe('icon-phase2.png');
     expect(screen.queryByRole('button', { name: /diagnostics/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Reading' })).toBeNull();
 
     const home = screen.getByRole('button', { name: 'Home' });
     expect(home.getAttribute('aria-current')).toBe('page');
@@ -104,7 +105,6 @@ describe('Phase 2 authenticated shell contract', () => {
       ['Movies', 'movies'],
       ['Shows', 'shows'],
       ['Music', 'music'],
-      ['Reading', 'reading'],
       ['Search', 'search']
     ];
     for (const [label, destination] of destinations) {

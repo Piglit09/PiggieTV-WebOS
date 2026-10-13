@@ -9,6 +9,7 @@ import { PTV_APPLICATION_VERSION, PTV_DEVICE_NAME } from '../config/app';
 import { PlaybackLifecycle } from '../playback/lifecycle';
 import type { PtvCapability, PtvError, PtvLibrary, PtvPlaybackIntent, PtvRoute, PtvServerSession, PtvUserSession } from '../types/ptv';
 import { buildRoute } from '../navigation/router';
+import { StartupRestoreCoordinator } from '../app/startupRestoreCoordinator';
 
 export interface AppSettings {
   reducedMotion: boolean;
@@ -68,6 +69,7 @@ interface AppServices {
   focusManager: FocusManager;
   requestTracker: RequestTracker;
   diagnostics: DiagnosticsService;
+  startupRestore: StartupRestoreCoordinator;
 }
 
 interface AppContextValue {
@@ -237,6 +239,7 @@ export function AppProvider(props: React.PropsWithChildren) {
     const focusManager = new FocusManager();
     const requestTracker = new RequestTracker();
     const diagnostics = new DiagnosticsService();
+    const startupRestore = new StartupRestoreCoordinator();
     const jellyfin = new JellyfinClientContext(storage.getOrCreateDeviceId(), requestTracker);
     const playback = new PlaybackLifecycle();
     const session = new SessionController({
@@ -336,7 +339,7 @@ export function AppProvider(props: React.PropsWithChildren) {
       }
     });
     diagnostics.attachTracker(requestTracker);
-    return { storage, jellyfin, session, playback, focusManager, requestTracker, diagnostics };
+    return { storage, jellyfin, session, playback, focusManager, requestTracker, diagnostics, startupRestore };
   }, [dispatch]);
 
   return <AppContext.Provider value={{ state, dispatch, services }}>{props.children}</AppContext.Provider>;

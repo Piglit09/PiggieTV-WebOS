@@ -10,7 +10,6 @@ const PRIMARY_NAV: ReadonlyArray<{ section: Exclude<ShellSection, 'settings'>; l
   { section: 'movies', label: 'Movies', screen: 'movies' },
   { section: 'shows', label: 'Shows', screen: 'shows' },
   { section: 'music', label: 'Music', screen: 'music' },
-  { section: 'reading', label: 'Reading', screen: 'reading' },
   { section: 'search', label: 'Search', screen: 'search' }
 ];
 

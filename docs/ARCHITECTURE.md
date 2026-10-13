@@ -104,7 +104,7 @@ The authenticated response may include a server ID, and the controller validates
 3. Normalize the URL, clear shared authorization, configure the shared client, and validate the public server endpoint with an abortable 10-second request.
 4. Persist the validated server metadata.
 5. If no matching session exists, route to sign-in.
-6. Configure the shared client with the stored token and validate `Users/{userId}` with an abortable 8-second request.
+6. Configure the shared client with the stored token and validate `Users/Me` with one abortable 8-second request.
 7. Require the returned user ID to match the stored user; commit the restored user session and reset the route stack to Home.
 
 A `401` or `403` proves the stored token is rejected, so startup clears the shared authorization, app user state, and canonical persisted session before routing to sign-in with an expired-session message. A timeout, network failure, or other transient validation failure clears only in-memory/shared authorization and routes to sign-in without destroying the stored session. Capability discovery is cancellable and begins after authentication; it does not block the session commit or Home navigation.

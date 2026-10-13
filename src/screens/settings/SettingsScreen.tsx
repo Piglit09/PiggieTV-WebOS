@@ -4,6 +4,7 @@ import { LayoutShell } from '../../components/LayoutShell';
 import { buildRoute } from '../../navigation/router';
 import { FocusableButton } from '../../components/FocusableButton';
 import { redactSensitiveText } from '../../core/redaction';
+import { PTV_APPLICATION_VERSION } from '../../config/app';
 
 type SettingsCategory = 'server' | 'account' | 'playback' | 'appearance' | 'diagnostics' | 'signout';
 
@@ -29,7 +30,7 @@ export function SettingsScreen() {
   const { state, dispatch, services } = useApp();
   const [category, setCategory] = useState<SettingsCategory>('server');
   const [error, setError] = useState<string | null>(null);
-  const appVersion = import.meta.env.VITE_PTV_VERSION ?? '0.1.0';
+  const appVersion = import.meta.env.VITE_PTV_VERSION ?? PTV_APPLICATION_VERSION;
 
   const leaveSession = async (target: 'auth' | 'server') => {
     services.session.cancelCurrentAttempt();

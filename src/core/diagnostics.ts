@@ -1,10 +1,16 @@
 import type { PtvDiagnosticsSnapshot } from '../types/ptv';
+import type { FocusReconciliationEvent } from '../focus/FocusManager';
 import type { RequestTracker } from './requestTracker';
 import { redactSensitiveText } from './redaction';
 import {
   HomePerformanceStore,
   type HomePerformanceAttemptUpdate
 } from './homePerformance';
+import {
+  RuntimeDiagnosticsMonitor,
+  runtimeDiagnosticsEnabled,
+  type RuntimeDiagnosticsOptions
+} from './runtimeDiagnostics';
 
 interface DiagnosticsLog {
   id: string;
@@ -13,6 +19,8 @@ interface DiagnosticsLog {
   message: string;
   details?: string | null;
 }
+
+const FOCUS_ID_URL_PATTERN = /(?:https?|wss?)(?::\/\/|%3a%2f%2f)/i;
 
 export interface DiagnosticsSnapshotInput {
   appVersion: string;
@@ -49,6 +57,11 @@ export interface DiagnosticsSnapshotInput {
   } | null;
 }
 
+export interface DiagnosticsServiceOptions {
+  runtimeDiagnostics?: Omit<RuntimeDiagnosticsOptions, 'enabled'>;
+  runtimeDiagnosticsEnabled?: boolean;
+}
+
 export class DiagnosticsService {
   private logs: DiagnosticsLog[] = [];
   private lastUiError: string | null = null;
@@ -61,14 +74,32 @@ export class DiagnosticsService {
   private lifecycleEvents: Array<Record<string, unknown>> = [];
   private navigationEvents: Array<Record<string, unknown>> = [];
   private focusTransitions: Array<Record<string, unknown>> = [];
+  private focusReconciliationEvents: Array<Record<string, unknown>> = [];
+  private focusReconciliationSnapshot: Record<string, unknown> | null = null;
+  private showsLibraryEvents: Array<Record<string, unknown>> = [];
+  private showsLibrarySnapshot: Record<string, unknown> | null = null;
+  private showsLibrarySignature: string | null = null;
+  private runtimeHeartbeatContext: Record<string, unknown> = {};
   private lastRouteFocusRestore: Record<string, unknown> | null = null;
   private logSequence = 0;
   private readonly maxLogs = 200;
   private requestTracker?: RequestTracker;
   private readonly homePerformance = new HomePerformanceStore();
+  private readonly runtimeDiagnostics: RuntimeDiagnosticsMonitor;
+
+  public constructor(options: DiagnosticsServiceOptions = {}) {
+    this.runtimeDiagnostics = new RuntimeDiagnosticsMonitor({
+      ...options.runtimeDiagnostics,
+      enabled: options.runtimeDiagnosticsEnabled ?? runtimeDiagnosticsEnabled()
+    });
+  }
 
   public attachTracker(tracker: RequestTracker) {
     this.requestTracker = tracker;
+  }
+
+  public get runtimeDiagnosticsActive() {
+    return this.runtimeDiagnostics.enabled;
   }
 
   public logInfo(message: string, details?: unknown) {
@@ -115,7 +146,85 @@ export class DiagnosticsService {
 
   public recordLifecycleEvent(event: string | object) {
     const record = typeof event === 'string' ? { event } : event;
-    this.pushBounded(this.lifecycleEvents, this.withTimestamp(record), 30);
+    this.pushBounded(this.lifecycleEvents, this.withTimestamp({
+      ...record,
+      pageInstanceId: this.runtimeDiagnostics.page.pageInstanceId
+    }), 30);
+  }
+
+  public recordShowsLibraryEvent(event: object) {
+    if (!this.runtimeDiagnostics.enabled) return;
+    const safeEvent = this.sanitizeRecord({
+      ...event,
+      pageInstanceId: this.runtimeDiagnostics.page.pageInstanceId
+    });
+    const signature = JSON.stringify(safeEvent);
+    if (signature === this.showsLibrarySignature) return;
+    this.showsLibrarySignature = signature;
+    const timestampedEvent = this.withTimestamp(safeEvent);
+    this.showsLibrarySnapshot = { ...timestampedEvent };
+    this.pushBounded(this.showsLibraryEvents, timestampedEvent, 24);
+    this.runtimeDiagnostics.recordHeartbeat({
+      ...this.runtimeHeartbeatContext,
+      showsLibrary: { ...timestampedEvent }
+    });
+  }
+
+  public startRuntimeDiagnostics(provider: () => Record<string, unknown>) {
+    if (!this.runtimeDiagnostics.enabled) return () => undefined;
+    const stopHeartbeat = this.runtimeDiagnostics.startHeartbeat(() => this.sanitizeRecord({
+      ...provider(),
+      ...this.runtimeHeartbeatContext,
+      focusReconciliation: this.getFocusReconciliationEvidence(),
+      showsLibrary: this.showsLibrarySnapshot ? { ...this.showsLibrarySnapshot } : null
+    }));
+    if (typeof window === 'undefined') return stopHeartbeat;
+
+    const diagnosticsWindow = window as unknown as Record<string, unknown>;
+    const healthApi = Object.freeze({
+      snapshot: () => this.getRuntimeHealthSnapshot()
+    });
+    try {
+      Object.defineProperty(diagnosticsWindow, '__ptvDiagnosticHealth', {
+        configurable: true,
+        enumerable: false,
+        value: healthApi,
+        writable: false
+      });
+    } catch {
+      // A restricted WebView may reject diagnostic globals; heartbeat evidence still works.
+    }
+
+    return () => {
+      stopHeartbeat();
+      try {
+        if (diagnosticsWindow.__ptvDiagnosticHealth === healthApi) {
+          delete diagnosticsWindow.__ptvDiagnosticHealth;
+        }
+      } catch {
+        // Cleanup must not interrupt application unmount.
+      }
+    };
+  }
+
+  public recordRuntimeHeartbeat(extra: Record<string, unknown> = {}) {
+    if (!this.runtimeDiagnostics.enabled) return null;
+    this.runtimeHeartbeatContext = {
+      ...this.runtimeHeartbeatContext,
+      ...this.sanitizeRecord(extra)
+    };
+    return this.runtimeDiagnostics.recordHeartbeat(this.runtimeHeartbeatContext);
+  }
+
+  public getRuntimeHealthSnapshot() {
+    return {
+      ...this.runtimeDiagnostics.snapshot(),
+      focusReconciliation: this.getFocusReconciliationEvidence(),
+      showsLibrary: {
+        current: this.showsLibrarySnapshot ? { ...this.showsLibrarySnapshot } : null,
+        recentEvents: this.showsLibraryEvents.slice(-12).map(event => ({ ...event }))
+      }
+    };
   }
 
   public recordNavigationEvent(event: object) {
@@ -129,6 +238,17 @@ export class DiagnosticsService {
     if (reason === 'route-restore' || reason === 'route-fallback' || reason === 'route-change') {
       this.lastRouteFocusRestore = { ...safeTransition };
     }
+    this.publishImmediateFocusHeartbeat({
+      lastFocusTransition: { ...safeTransition }
+    });
+  }
+
+  public recordFocusReconciliationEvent(event: FocusReconciliationEvent) {
+    if (!this.runtimeDiagnostics.enabled) return;
+    const safeEvent = this.withTimestamp(event);
+    this.focusReconciliationSnapshot = { ...safeEvent };
+    this.pushBounded(this.focusReconciliationEvents, safeEvent, 30);
+    this.publishImmediateFocusHeartbeat();
   }
 
   public resetErrors() {
@@ -251,7 +371,13 @@ export class DiagnosticsService {
       recentLifecycleEvents: this.lifecycleEvents.slice(-12).map(event => ({ ...event })),
       lastRouteFocusRestore: this.lastRouteFocusRestore ? { ...this.lastRouteFocusRestore } : null,
       recentFocusTransitions: this.focusTransitions.slice(-12).map(event => ({ ...event })),
-      homePerformance: this.homePerformance.snapshot()
+      focusReconciliation: this.getFocusReconciliationEvidence(),
+      homePerformance: this.homePerformance.snapshot(),
+      runtimeLifecycle: this.runtimeDiagnostics.snapshot(),
+      showsLibrary: {
+        current: this.showsLibrarySnapshot ? { ...this.showsLibrarySnapshot } : null,
+        recentEvents: this.showsLibraryEvents.slice(-12).map(event => ({ ...event }))
+      }
     };
   }
 
@@ -329,6 +455,7 @@ export class DiagnosticsService {
       return '[redacted]';
     }
     if (normalizedKey === 'userid') return this.redactSensitive(value);
+    if (normalizedKey.endsWith('itemid')) return this.redactIdentifier(value);
     if (normalizedKey === 'serverurl' || normalizedKey === 'serverorigin') return this.redactServerUrl(value);
     if (normalizedKey.endsWith('route') || normalizedKey === 'routeid') return this.sanitizeRoute(value);
     if (normalizedKey.endsWith('focusid')) return this.sanitizeFocusId(value);
@@ -343,6 +470,23 @@ export class DiagnosticsService {
   private pushBounded(target: Array<Record<string, unknown>>, event: Record<string, unknown>, maximum: number) {
     target.push({ ...event });
     while (target.length > maximum) target.shift();
+  }
+
+  private getFocusReconciliationEvidence() {
+    return {
+      current: this.focusReconciliationSnapshot ? { ...this.focusReconciliationSnapshot } : null,
+      recentEvents: this.focusReconciliationEvents.slice(-12).map(event => ({ ...event }))
+    };
+  }
+
+  private publishImmediateFocusHeartbeat(extra: Record<string, unknown> = {}) {
+    if (!this.runtimeDiagnostics.enabled) return null;
+    return this.runtimeDiagnostics.recordHeartbeat({
+      ...this.runtimeHeartbeatContext,
+      focusReconciliation: this.getFocusReconciliationEvidence(),
+      showsLibrary: this.showsLibrarySnapshot ? { ...this.showsLibrarySnapshot } : null,
+      ...extra
+    });
   }
 
   private getLastEvent(events: Array<Record<string, unknown>>) {
@@ -377,6 +521,11 @@ export class DiagnosticsService {
     return input.length > 4 ? `...${input.slice(-4)}` : '[redacted]';
   }
 
+  private redactIdentifier(input?: string | null) {
+    if (!input) return '[redacted]';
+    return input.length > 8 ? `...${input.slice(-8)}` : input;
+  }
+
   private sanitizeRoute(input?: string | null) {
     if (!input) return null;
     return redactSensitiveText(input)
@@ -386,10 +535,14 @@ export class DiagnosticsService {
 
   private sanitizeFocusId(input?: string | null) {
     if (!input) return null;
+    if (/^recent-remove-/i.test(input)) return 'recent-remove-[redacted-server]';
+    if (/^recent-/i.test(input)) return 'recent-[redacted-server]';
+    if (FOCUS_ID_URL_PATTERN.test(input)) return '[redacted-focus-url]';
     return redactSensitiveText(input)
       .replace(/^(home-(?:continue|nextup|movies|shows)-).+$/i, '$1[redacted]')
       .replace(/^((?:browse|movie|show|search)-[^-]+-).+$/i, '$1[redacted]')
-      .replace(/^(details-(?:episode|season)-)\w{8,}$/i, '$1[redacted]');
+      .replace(/^(details-(?:season-episode|related|season|episode|track)-).+$/i, '$1[redacted]')
+      .replace(/^(playback-queue-\d+-).+$/i, '$1[redacted]');
   }
 
   private safeRead<T>(fn: () => T) {

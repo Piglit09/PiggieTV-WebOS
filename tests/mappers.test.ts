@@ -7,6 +7,7 @@ import {
   isMusicAlbumItem,
   isMusicArtistItem,
   isMovieItem,
+  isMusicVideoItem,
   isPhotoOrUnsupportedItem,
   isSeriesItem,
   isUnsupportedDetailItem,
@@ -49,6 +50,136 @@ describe('Ptv item mapper', () => {
     expect(mapped.favorite).toBe(true);
   });
 
+  it('uses the clean Jellyfin Name and keeps ProductionYear as a separate field', () => {
+    const mapped = mapPtvItem({
+      Id: 'series-clean-name',
+      Name: 'Clean Library Name',
+      OriginalTitle: 'Original Name [Provider 2026]',
+      SortName: 'Clean Library Name, The (2026)',
+      Path: '/media/shows/Clean.Library.Name.2026.Provider/series.mkv',
+      ProductionYear: 2026,
+      Type: 'Series'
+    });
+
+    expect(mapped.name).toBe('Clean Library Name');
+    expect(mapped.productionYear).toBe(2026);
+    expect(mapped.name).not.toContain('2026');
+    expect(mapped.name).not.toContain('/media/');
+  });
+
+  it('maps rich video, audio, and subtitle media source metadata', () => {
+    const mapped = mapPtvItem({
+      Id: 'movie-rich-media',
+      Name: 'Rich Media Movie',
+      Type: 'Movie',
+      MediaSources: [{
+        Id: 'source-4k',
+        Container: 'mkv',
+        VideoCodec: 'hevc',
+        AudioCodec: 'eac3',
+        Bitrate: 24_000_000,
+        Width: 3840,
+        Height: 2160,
+        DirectStreamUrl: '/Videos/movie-rich-media/stream',
+        TranscodingUrl: '/Videos/movie-rich-media/master.m3u8',
+        MediaStreams: [{
+          Id: 'video-0',
+          Type: 'Video',
+          Index: 0,
+          Codec: 'hevc',
+          BitRate: 18_000_000,
+          Width: 3840,
+          Height: 2160,
+          Profile: 'Main 10',
+          VideoRange: 'HDR10',
+          VideoRangeType: 'HDR10',
+          IsDefault: true
+        }, {
+          Id: 'audio-2',
+          Type: 'Audio',
+          Index: 2,
+          Codec: 'eac3',
+          Language: 'eng',
+          Title: 'English',
+          DisplayTitle: 'English Dolby Digital+ 5.1',
+          ChannelLayout: '5.1',
+          Channels: 6,
+          IsDefault: true
+        }, {
+          Id: 'subtitle-5',
+          Type: 'Subtitle',
+          Index: 5,
+          Codec: 'subrip',
+          Language: 'eng',
+          Title: 'English Forced',
+          DisplayTitle: 'English Forced SRT',
+          IsForced: true,
+          IsExternal: true
+        }]
+      }]
+    });
+
+    expect(mapped.mediaSources).toHaveLength(1);
+    expect(mapped.mediaSources?.[0]).toMatchObject({
+      id: 'source-4k',
+      container: 'mkv',
+      videoCodec: 'hevc',
+      audioCodec: 'eac3',
+      bitrate: 24_000_000,
+      width: 3840,
+      height: 2160,
+      directStreamUrl: '/Videos/movie-rich-media/stream',
+      transcodingUrl: '/Videos/movie-rich-media/master.m3u8'
+    });
+    expect(mapped.mediaSources?.[0]?.streams).toEqual([
+      expect.objectContaining({
+        id: 'video-0',
+        index: 0,
+        type: 'Video',
+        codec: 'hevc',
+        bitrate: 18_000_000,
+        width: 3840,
+        height: 2160,
+        profile: 'Main 10',
+        videoRange: 'HDR10',
+        videoRangeType: 'HDR10',
+        isDefault: true,
+        isVideoStream: true,
+        isAudioStream: false,
+        isSubtitleStream: false
+      }),
+      expect.objectContaining({
+        id: 'audio-2',
+        index: 2,
+        type: 'Audio',
+        codec: 'eac3',
+        language: 'eng',
+        title: 'English',
+        displayTitle: 'English Dolby Digital+ 5.1',
+        channelLayout: '5.1',
+        channelCount: 6,
+        isDefault: true,
+        isVideoStream: false,
+        isAudioStream: true,
+        isSubtitleStream: false
+      }),
+      expect.objectContaining({
+        id: 'subtitle-5',
+        index: 5,
+        type: 'Subtitle',
+        codec: 'subrip',
+        language: 'eng',
+        title: 'English Forced',
+        displayTitle: 'English Forced SRT',
+        isForced: true,
+        isExternal: true,
+        isVideoStream: false,
+        isAudioStream: false,
+        isSubtitleStream: true
+      })
+    ]);
+  });
+
   it('falls back image tag mapping to PrimaryImageTag', () => {
     const mapped = mapPtvItem({
       Id: 'movie-2',
@@ -73,6 +204,30 @@ describe('Ptv item mapper', () => {
     expect(mapPtvItems(response, { includeUnsupportedTypes: true }).map(item => item.id)).toEqual(['x-1', 'x-2', 'x-3']);
   });
 
+  it('maps container counts and can exclude only explicitly empty shows and seasons', () => {
+    const response = {
+      Items: [
+        { Id: 'empty-series', Name: 'Empty Series', Type: 'Series', ChildCount: 2, RecursiveItemCount: 0 },
+        { Id: 'ready-series', Name: 'Ready Series', Type: 'Series', ChildCount: 2, RecursiveItemCount: 12 },
+        { Id: 'unknown-count-series', Name: 'Legacy Series', Type: 'Series' },
+        { Id: 'empty-season', Name: 'Empty Season', Type: 'Season', RecursiveItemCount: 0 },
+        { Id: 'episode-1', Name: 'Pilot', Type: 'Episode' }
+      ]
+    };
+
+    const allItems = mapPtvItems(response);
+    expect(allItems[0]).toMatchObject({
+      id: 'empty-series',
+      childCount: 2,
+      recursiveItemCount: 0
+    });
+    expect(mapPtvItems(response, { excludeEmptyVideoContainers: true }).map(item => item.id)).toEqual([
+      'ready-series',
+      'unknown-count-series',
+      'episode-1'
+    ]);
+  });
+
   it('handles missing identity safely without leaking object text', () => {
     const mapped = mapPtvItem({
       Id: 'no-name',
@@ -88,7 +243,16 @@ describe('Ptv item mapper', () => {
     expect(() => mapPtvItem({ Name: 'NoId', Type: 'Movie' })).toThrow();
     expect(mapPtvItem({ Id: 'x', Type: undefined, Name: 'NoType' }).type).toBe('Unknown');
     expect(mapItemTypeFromServer('Series')).toBe('Series');
+    expect(mapItemTypeFromServer('series')).toBe('Series');
     expect(mapItemTypeFromServer('UnknownStuff')).toBe('Unknown');
+  });
+
+  it('preserves taxonomy result types and maps Jellyfin BoxSet collections', () => {
+    expect(mapPtvItem({ Id: 'genre-1', Type: 'Genre', Name: 'Drama' }).type).toBe('Genre');
+    expect(mapPtvItem({ Id: 'music-genre-1', Type: 'MusicGenre', Name: 'Dream Pop' }).type).toBe('MusicGenre');
+    expect(mapPtvItem({ Id: 'studio-1', Type: 'Studio', Name: 'Pixar' }).type).toBe('Studio');
+    expect(mapPtvItem({ Id: 'collection-1', Type: 'BoxSet', Name: 'Favorites' }).type).toBe('Collection');
+    expect(canNavigateToDetails(mapPtvItem({ Id: 'genre-1', Type: 'Genre', Name: 'Drama' }))).toBe(false);
   });
 
   it('flags requested item categories correctly', () => {
@@ -99,6 +263,7 @@ describe('Ptv item mapper', () => {
     const album = mapPtvItem({ Id: 'a', Type: 'MusicAlbum', Name: 'Album' });
     const artist = mapPtvItem({ Id: 'ar', Type: 'MusicArtist', Name: 'Artist' });
     const song = mapPtvItem({ Id: 't', Type: 'Audio', Name: 'Track' });
+    const video = mapPtvItem({ Id: 'mv', Type: 'MusicVideo', Name: 'Music Video' });
     const book = mapPtvItem({ Id: 'b', Type: 'Book', Name: 'Book' });
     const photo = mapPtvItem({ Id: 'p', Type: 'PhotoAlbum', Name: 'Photo set' });
     const folder = mapPtvItem({ Id: 'f', Type: 'Folder', Name: 'Folder' });
@@ -109,6 +274,7 @@ describe('Ptv item mapper', () => {
     expect(isMusicAlbumItem(album)).toBe(true);
     expect(isMusicArtistItem(artist)).toBe(true);
     expect(isAudioTrackItem(song)).toBe(true);
+    expect(isMusicVideoItem(video)).toBe(true);
     expect(isBookItem(book)).toBe(true);
     expect(isPhotoOrUnsupportedItem(photo)).toBe(true);
     expect(isFolderOrCollectionItem(folder)).toBe(true);
@@ -139,5 +305,66 @@ describe('Ptv item mapper', () => {
     expect(result.map(item => item.id)).toEqual(
       fixtures.map(item => item.Id)
     );
+  });
+
+  it('infers audio items when type case differs or is omitted with audio media type', () => {
+    const lower = mapPtvItem({
+      Id: 'case-audio',
+      Type: 'audio',
+      Name: 'Case Audio'
+    });
+    const audioFromMediaType = mapPtvItem({
+      Id: 'audio-media',
+      Name: 'Audio By MediaType',
+      MediaType: 'Audio'
+    });
+
+    expect(lower.type).toBe('Audio');
+    expect(audioFromMediaType.type).toBe('Audio');
+    expect(lower.type).not.toBe('Movie');
+    expect(audioFromMediaType.type).not.toBe('Movie');
+  });
+
+  it('maps audio track media metadata', () => {
+    const mapped = mapPtvItem({
+      Id: 'song-1',
+      Type: 'Audio',
+      Name: 'Fearless',
+      Artists: ['Taylor Swift'],
+      AlbumArtist: 'Taylor Swift',
+      Album: 'Fearless',
+      AlbumId: 'album-1',
+      IndexNumber: 1,
+      TrackCount: 2,
+      RunTimeTicks: 300000000,
+      ProductionYear: 2008,
+      Genres: ['Pop'],
+      ImageTags: { Primary: 'cover' },
+      BackdropImageTags: ['bg-1'],
+      MediaSources: [{
+        Id: 'source-1',
+        Container: 'flac',
+        Codec: 'flac',
+        MediaStreams: [{ Type: 'Audio', Index: 1, Codec: 'flac', Language: 'en', ChannelCount: 2 }]
+      }],
+      UserData: {
+        PlaybackPositionTicks: 12000000,
+        Played: false,
+        IsFavorite: true
+      }
+    });
+
+    expect(mapped.type).toBe('Audio');
+    expect(mapped.artists).toEqual(['Taylor Swift']);
+    expect(mapped.albumArtist).toBe('Taylor Swift');
+    expect(mapped.album).toBe('Fearless');
+    expect(mapped.albumId).toBe('album-1');
+    expect(mapped.trackNumber).toBe(1);
+    expect(mapped.trackCount).toBe(2);
+    expect(mapped.playbackPositionTicks).toBe(12000000);
+    expect(mapped.favorite).toBe(true);
+    expect(mapped.mediaSources?.[0]?.id).toBe('source-1');
+    expect(mapped.mediaSources?.[0]?.streams?.[0]?.isAudioStream).toBe(true);
+    expect(mapped.mediaSources?.[0]?.streams?.[0]?.channelCount).toBe(2);
   });
 });

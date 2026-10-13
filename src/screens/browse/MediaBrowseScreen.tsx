@@ -29,7 +29,7 @@ const FILTERS: ReadonlyArray<{ id: MediaBrowseFilter; label: string }> = [
 const BROWSE_CONFIG: Record<BrowseScreenId, { title: string; itemType: string; empty: string }> = {
   movies: { title: 'Movies', itemType: 'Movie', empty: 'No movies match this view.' },
   shows: { title: 'Shows', itemType: 'Series', empty: 'No shows match this view.' },
-  music: { title: 'Music', itemType: 'MusicAlbum', empty: 'No albums match this view.' },
+  music: { title: 'Music', itemType: 'MusicAlbum,Audio,MusicArtist,MusicVideo,Playlist', empty: 'No music titles match this view.' },
   reading: { title: 'Reading', itemType: 'Book', empty: 'No books match this view.' }
 };
 
@@ -75,13 +75,15 @@ export function MediaBrowseScreen({ screenId }: { screenId: BrowseScreenId }) {
       SortBy: filter === 'recent' ? 'DateCreated' : 'SortName',
       SortOrder: filter === 'recent' ? 'Descending' : 'Ascending',
       Filters: filter === 'favorites' ? 'IsFavorite' : undefined,
-      Fields: 'ImageTags,BackdropImageTags,Overview,ProductionYear,RunTimeTicks,OfficialRating,CommunityRating,Genres,UserData',
+      Fields: 'ImageTags,BackdropImageTags,Overview,ProductionYear,RunTimeTicks,OfficialRating,CommunityRating,Genres,UserData,ChildCount,RecursiveItemCount',
       EnableUserData: true,
       EnableTotalRecordCount: true
     }, controller.signal)
       .then(response => {
         if (controller.signal.aborted) return;
-        const mapped = mapPtvItems(response);
+        const mapped = mapPtvItems(response, {
+          excludeEmptyVideoContainers: screenId === 'shows'
+        });
         const totalRecordCount = typeof response.TotalRecordCount === 'number'
           ? response.TotalRecordCount
           : undefined;

@@ -41,10 +41,21 @@ export interface PtvPlaybackSourceStream {
   Index?: number;
   Type: 'Audio' | 'Video' | 'Subtitle';
   DisplayTitle?: string | null;
+  Title?: string | null;
   Codec?: string | null;
   Language?: string | null;
   DeliveryMethod?: string | null;
   IsDefault?: boolean;
+  IsForced?: boolean;
+  IsExternal?: boolean;
+  Width?: number | null;
+  Height?: number | null;
+  BitRate?: number | null;
+  Profile?: string | null;
+  VideoRange?: string | null;
+  VideoRangeType?: string | null;
+  ChannelLayout?: string | null;
+  Channels?: number | null;
 }
 
 export interface PtvPlaybackMediaSource {
@@ -83,13 +94,18 @@ export interface PtvItemFields {
   ServerId?: string;
 }
 
+export type PtvPlaybackPlayMethod = 'DirectPlay' | 'DirectStream' | 'Transcode';
+
 export interface PtvPlaybackReport {
   ItemId: string;
   PlaySessionId: string;
   PositionTicks: number;
   IsPaused?: boolean;
   MediaSourceId?: string;
-  MediaSourceId2?: string;
+  PlayMethod?: PtvPlaybackPlayMethod;
+  CanSeek?: boolean;
+  AudioStreamIndex?: number;
+  SubtitleStreamIndex?: number;
 }
 
 export interface PtvItemListResponse<T> {

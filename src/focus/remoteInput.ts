@@ -147,6 +147,10 @@ export class GlobalRemoteInputController {
     const action = normalizeRemoteInput(event);
     if (!action) return;
 
+    if (action.kind === 'move' || action.kind === 'activate') {
+      this.options.focusManager.claimRemoteInteraction();
+    }
+
     const routeId = this.options.getRouteId?.() ?? this.options.focusManager.activeRoute;
     const previousFocusId = this.options.focusManager.focusId;
     const keyCode = numericKeyCode(event);

@@ -35,6 +35,16 @@ npm run dev
 npm run build
 ```
 
+## Version bump
+
+`appinfo.json` is the app-version authority. The version tool advances one patch and keeps the package metadata synchronized:
+
+```bash
+npm run version:bump
+```
+
+Patch and minor values run from `0` to `99`; `0.0.99` becomes `0.1.0`. The tool refuses to create a new major release automatically. Run `npm run version:check` to verify synchronization and the boundary rules without changing the version.
+
 ## webOS package
 
 ```bash

@@ -656,6 +656,84 @@ describe('PlaybackEngine authoritative lifecycle', () => {
     failedEngine.dispose();
   });
 
+  it('reports the selected media source, play method, seekability, and stream indexes', async () => {
+    const video = new FakeVideoElement();
+    video.readyState = 3;
+    video.duration = 120;
+    video.ranges = [{ start: 0, end: 120 }];
+    const reportPlaying = vi.fn(async () => undefined);
+    const engine = new PlaybackEngine(undefined, {}, {
+      resolveSource: vi.fn(async () => ({
+        ...resolvedSource(),
+        mode: 'direct-stream' as const,
+        audioStreamIndex: 2,
+        subtitleStreamIndex: 5
+      })),
+      reportPlaying
+    });
+    engine.attach(asVideo(video));
+
+    await engine.start({ itemId: 'movie-report-contract' });
+    await engine.whenReportsSettled();
+
+    expect(reportPlaying).toHaveBeenCalledWith(expect.objectContaining({
+      itemId: 'movie-report-contract',
+      playSessionId: 'play-session-123456',
+      mediaSourceId: 'media-source-abcdef',
+      playMethod: 'DirectStream',
+      canSeek: true,
+      audioStreamIndex: 2,
+      subtitleStreamIndex: 5,
+      isPaused: false
+    }));
+    engine.dispose();
+  });
+
+  it('skips a queued stale progress report once a stopped report supersedes it', async () => {
+    const video = new FakeVideoElement();
+    video.readyState = 3;
+    video.duration = 120;
+    video.ranges = [{ start: 0, end: 120 }];
+    let resolvePlaying!: () => void;
+    const playingReport = new Promise<void>(resolve => {
+      resolvePlaying = resolve;
+    });
+    const reportPlaying = vi.fn(() => playingReport);
+    const reportProgress = vi.fn(async () => undefined);
+    const reportStopped = vi.fn(async () => undefined);
+    const engine = new PlaybackEngine(undefined, {}, {
+      resolveSource: vi.fn(async () => resolvedSource()),
+      reportPlaying,
+      reportProgress,
+      reportStopped,
+      setInterval: vi.fn(() => 41),
+      clearInterval: vi.fn()
+    });
+    engine.attach(asVideo(video));
+
+    await engine.start({ itemId: 'movie-stop-priority' });
+    await flushPromises();
+    expect(reportPlaying).toHaveBeenCalledTimes(1);
+
+    engine.pause();
+    const stopped = engine.stop('back');
+    resolvePlaying();
+    await stopped;
+
+    expect(reportProgress).not.toHaveBeenCalled();
+    expect(reportStopped).toHaveBeenCalledTimes(1);
+    expect(engine.getDiagnosticsSnapshot()).toMatchObject({
+      stoppedReports: 1,
+      progressReports: 0,
+      reportEvidence: {
+        queued: { progress: 1, stopped: 1 },
+        attempted: { progress: 0, stopped: 1 },
+        skipped: { progress: 1 },
+        succeeded: { progress: 0, stopped: 1 }
+      }
+    });
+  });
+
   it('separates source codecs from requested and server-selected transcode output', async () => {
     const video = new FakeVideoElement();
     video.readyState = 3;

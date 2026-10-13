@@ -1,6 +1,11 @@
 import type { PtvError } from '../../types/ptv';
 import { mapStatusToErrorKind, toPtvError } from '../../core/errors';
 import type { RequestTracker } from '../../core/requestTracker';
+import {
+  PTV_APPLICATION_NAME,
+  PTV_APPLICATION_VERSION,
+  PTV_DEVICE_NAME
+} from '../../config/app';
 
 export type RequestMethod = 'GET' | 'POST' | 'PUT' | 'DELETE';
 
@@ -95,18 +100,18 @@ function buildHeaders(
   authorization?: JellyfinAuthorizationContext | string
 ) {
   const context: JellyfinAuthorizationContext = typeof authorization === 'string'
-    ? {
+      ? {
         accessToken: authorization,
-        clientName: 'PiggieTV',
-        deviceName: 'LG webOS TV',
+        clientName: PTV_APPLICATION_NAME,
+        deviceName: PTV_DEVICE_NAME,
         deviceId: 'unknown',
-        applicationVersion: '0.1.0'
+        applicationVersion: PTV_APPLICATION_VERSION
       }
     : authorization ?? {
-        clientName: 'PiggieTV',
-        deviceName: 'LG webOS TV',
+        clientName: PTV_APPLICATION_NAME,
+        deviceName: PTV_DEVICE_NAME,
         deviceId: 'unknown',
-        applicationVersion: '0.1.0'
+        applicationVersion: PTV_APPLICATION_VERSION
       };
   const embyAuth = [
     `MediaBrowser Client="${escapeAuthorizationValue(context.clientName)}"`,
