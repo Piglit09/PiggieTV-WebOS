@@ -9,6 +9,7 @@ vi.mock('../src/api/http/http', () => ({
 }));
 
 import { JellyfinApiClient, resolvePlaybackStreamUrl, sanitizeItemFields } from '../src/api/jellyfin/client';
+import { JellyfinClientContext } from '../src/api/jellyfin/context';
 
 function createClient() {
   return new JellyfinApiClient({
@@ -103,6 +104,81 @@ describe('JellyfinApiClient server identity compatibility', () => {
       }),
       expect.any(Object)
     );
+  });
+
+  it('captures the optional authenticated request context only for token-bearing requests', async () => {
+    requestJson
+      .mockResolvedValueOnce({ Items: [] })
+      .mockResolvedValueOnce({
+        Id: 'server-1',
+        ServerName: 'PiggieTV',
+        Version: '10.11.11'
+      });
+    const epoch = new AbortController();
+    const authenticatedRequest = {
+      ticket: { epoch: 3 },
+      signal: epoch.signal,
+      isCurrent: () => true,
+      onUnauthorized: vi.fn()
+    };
+    const provider = vi.fn(() => authenticatedRequest);
+    const client = new JellyfinApiClient({
+      baseUrl: 'https://piggietv.com',
+      accessToken: 'current-token',
+      deviceId: 'device-test',
+      authenticatedRequestContextProvider: provider
+    });
+
+    await client.getItems('user-1', {});
+    client.setAccessToken(undefined);
+    await client.validateServer();
+
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(requestJson.mock.calls[0]?.[1]?.authenticatedRequest).toBe(authenticatedRequest);
+    expect(requestJson.mock.calls[1]?.[1]).not.toHaveProperty('authenticatedRequest');
+  });
+
+  it('does not enter transport when the authenticated context is already stale', async () => {
+    const client = new JellyfinApiClient({
+      baseUrl: 'https://piggietv.com',
+      accessToken: 'stale-token',
+      deviceId: 'device-test',
+      authenticatedRequestContextProvider: () => ({
+        ticket: { epoch: 1 },
+        signal: new AbortController().signal,
+        isCurrent: () => false,
+        onUnauthorized: vi.fn()
+      })
+    });
+
+    await expect(client.getItems('user-1', {})).rejects.toMatchObject({ kind: 'cancelled-request' });
+    expect(requestJson).not.toHaveBeenCalled();
+  });
+
+  it('exposes an authenticated client only while the shared context has authorization', () => {
+    const context = new JellyfinClientContext('device-test');
+    const client = context.configureServer('https://piggietv.com');
+
+    expect(() => context.getAuthenticatedClient()).toThrow('not authorized');
+    context.setAuthorization('current-token');
+    expect(context.getAuthenticatedClient()).toBe(client);
+    context.clearAuthorization();
+    expect(() => context.getAuthenticatedClient()).toThrow('not authorized');
+  });
+
+  it('captures retiring authorization for centralized logout without clearing it', () => {
+    const context = new JellyfinClientContext('device-test');
+    expect(context.captureRetiringAuthorization()).toBeNull();
+
+    const client = context.configureSession('https://piggietv.com', 'retiring-token');
+    expect(context.captureRetiringAuthorization()).toEqual({
+      client,
+      accessToken: 'retiring-token'
+    });
+    expect(context.getAuthenticatedClient()).toBe(client);
+
+    context.reset();
+    expect(context.captureRetiringAuthorization()).toBeNull();
   });
 
   it('uses lean Home queries and disables unneeded result counts', async () => {
@@ -641,6 +717,41 @@ describe('JellyfinApiClient server identity compatibility', () => {
     });
   });
 
+  it('posts bounded remote logout with the explicit retiring token and no runtime-rejection context', async () => {
+    requestJson.mockResolvedValue({});
+    const provider = vi.fn(() => ({
+      ticket: { epoch: 12 },
+      signal: new AbortController().signal,
+      isCurrent: () => true,
+      onUnauthorized: vi.fn()
+    }));
+    const client = new JellyfinApiClient({
+      baseUrl: 'https://piggietv.com',
+      accessToken: 'newer-current-token',
+      deviceId: 'device-test',
+      authenticatedRequestContextProvider: provider
+    });
+
+    await client.logout('retiring-token');
+
+    expect(requestJson).toHaveBeenCalledWith(
+      'https://piggietv.com/Sessions/Logout',
+      expect.objectContaining({
+        method: 'POST',
+        timeoutMs: 5_000,
+        retries: 0,
+        requestCategory: 'authentication',
+        requestRoute: 'POST Sessions/Logout'
+      }),
+      expect.objectContaining({
+        accessToken: 'retiring-token',
+        deviceId: 'device-test'
+      })
+    );
+    expect(requestJson.mock.calls[0]?.[1]).not.toHaveProperty('authenticatedRequest');
+    expect(provider).not.toHaveBeenCalled();
+  });
+
   it('retries one failed playback-progress POST with the same complete payload', async () => {
     requestJson
       .mockRejectedValueOnce({
@@ -729,6 +840,22 @@ describe('JellyfinApiClient server identity compatibility', () => {
     expect(url.searchParams.get('container')).toBe('mp4');
   });
 
+  it('resolves playback URLs through the client without exposing its private token to callers', () => {
+    const client = new JellyfinApiClient({
+      baseUrl: 'https://piggietv.com',
+      accessToken: 'private-client-token',
+      deviceId: 'device-test'
+    });
+    const url = new URL(client.resolvePlaybackStreamUrl(
+      'item-1',
+      { Id: 'source-1', Container: 'mp4' },
+      'direct-play'
+    ));
+
+    expect(url.searchParams.get('api_key')).toBe('private-client-token');
+    expect(url.searchParams.get('deviceId')).toBe('device-test');
+  });
+
   it('preserves valid supplied direct-stream and transcode URLs', () => {
     const directStream = new URL(resolvePlaybackStreamUrl(
       'https://piggietv.com',
@@ -741,7 +868,7 @@ describe('JellyfinApiClient server identity compatibility', () => {
     const transcode = new URL(resolvePlaybackStreamUrl(
       'https://piggietv.com',
       'item-1',
-      { Id: 'source-1', TranscodingUrl: 'https://media.example.test/Videos/item-1/master.m3u8' },
+      { Id: 'source-1', TranscodingUrl: 'https://piggietv.com/Videos/item-1/master.m3u8' },
       'transcode',
       'test-token',
       'device-test'
@@ -751,10 +878,37 @@ describe('JellyfinApiClient server identity compatibility', () => {
     expect(directStream.pathname).toBe('/Videos/item-1/stream');
     expect(directStream.searchParams.get('api_key')).toBe('test-token');
     expect(directStream.searchParams.get('deviceId')).toBe('device-test');
-    expect(transcode.origin).toBe('https://media.example.test');
+    expect(transcode.origin).toBe('https://piggietv.com');
     expect(transcode.pathname).toBe('/Videos/item-1/master.m3u8');
     expect(transcode.searchParams.get('api_key')).toBe('test-token');
     expect(transcode.searchParams.get('deviceId')).toBe('device-test');
+  });
+
+  it('rejects cross-origin supplied playback URLs before attaching the current token', () => {
+    const privateToken = 'private-cross-origin-token';
+    const candidates = [
+      'https://collector.example.test/Videos/item-1/master.m3u8',
+      '//collector.example.test/Videos/item-1/master.m3u8',
+      'https://user:password@piggietv.com/Videos/item-1/master.m3u8'
+    ];
+
+    for (const suppliedPath of candidates) {
+      const invoke = () => resolvePlaybackStreamUrl(
+        'https://piggietv.com',
+        'item-1',
+        { Id: 'source-1', TranscodingUrl: suppliedPath },
+        'transcode',
+        privateToken,
+        'device-test'
+      );
+      expect(invoke).toThrow('Jellyfin provided an untrusted transcode URL');
+      try {
+        invoke();
+      } catch (error) {
+        expect(String(error)).not.toContain(privateToken);
+        expect(String(error)).not.toContain('collector.example.test');
+      }
+    }
   });
 
   it('rejects missing non-direct URLs without exposing request identifiers', () => {

@@ -11,10 +11,16 @@ const WEBOS_COMMANDS = new Set([
   'ares-inspect',
   'ares-install',
   'ares-launch',
+  'ares-novacom',
   'ares-package',
   'ares-setup-device'
 ]);
 const SAFE_BUILD_ASSET = /^[A-Za-z0-9._-]+\.js$/;
+const SYSTEM_POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+
+function systemPowerShellPath() {
+  return SYSTEM_POWERSHELL;
+}
 
 function readCliOption(args, names, label) {
   const optionIndex = args.findIndex(value => names.includes(value));
@@ -42,8 +48,7 @@ function requireSafeCliValue(value, label) {
 function requireDeviceAlias(args = process.argv.slice(2), env = process.env) {
   const alias = readDeviceAlias(args, env);
   if (!alias) {
-    const defaultAlias = 'PiggieTV-LG';
-    return requireSafeCliValue(defaultAlias, 'Device alias');
+    throw new Error('Missing explicit device alias. Pass --device or set PTV_WEBOS_TEST_DEVICE.');
   }
   return requireSafeCliValue(alias, 'Device alias');
 }
@@ -88,6 +93,18 @@ function findPowerShellCliScript(command, env = process.env) {
   throw new Error(`Could not resolve ${command}.ps1 from PATH.`);
 }
 
+function resolvePinnedCliScript(command, directory) {
+  if (!WEBOS_COMMANDS.has(command) || typeof directory !== 'string' || !path.isAbsolute(directory)) {
+    throw new Error('Approved SDK CLI directory is invalid.');
+  }
+  const resolvedDirectory = fs.realpathSync.native(directory);
+  const candidate = path.join(resolvedDirectory, `${command}.ps1`);
+  if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) {
+    throw new Error(`Approved SDK CLI script is missing: ${command}.`);
+  }
+  return candidate;
+}
+
 function runWebOsCli(command, args, options = {}) {
   if (!WEBOS_COMMANDS.has(command)) {
     throw new Error(`Unsupported webOS CLI command: ${command}`);
@@ -97,18 +114,12 @@ function runWebOsCli(command, args, options = {}) {
   }
 
   if (process.platform === 'win32') {
-    const script = findPowerShellCliScript(command, options.env ?? process.env);
-    const systemRoot = process.env.SystemRoot || 'C:\\Windows';
-    const powershell = path.join(
-      systemRoot,
-      'System32',
-      'WindowsPowerShell',
-      'v1.0',
-      'powershell.exe'
-    );
-    const { env, ...childOptions } = options;
+    const { env, cliDirectory, ...childOptions } = options;
+    const script = cliDirectory
+      ? resolvePinnedCliScript(command, cliDirectory)
+      : findPowerShellCliScript(command, env ?? process.env);
     return execFileSync(
-      powershell,
+      systemPowerShellPath(),
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, ...args],
       { windowsHide: true, env: env ?? process.env, ...childOptions }
     );
@@ -137,11 +148,13 @@ function copyValidatedBuildAssets(sourceDir, targetDir) {
 module.exports = {
   copyValidatedBuildAssets,
   findPowerShellCliScript,
+  resolvePinnedCliScript,
   readAppInfo,
   readCliOption,
   readDeviceAlias,
   requireDeviceAlias,
   requireHostIp,
   requireSafeCliValue,
-  runWebOsCli
+  runWebOsCli,
+  systemPowerShellPath
 };

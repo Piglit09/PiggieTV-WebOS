@@ -6,7 +6,6 @@ import {
   type PlaybackDiagnosticsSnapshot,
   type PlaybackEngineState
 } from '../../playback/engine';
-import { JellyfinApiClient, resolvePlaybackStreamUrl } from '../../api/jellyfin/client';
 import { mapPtvItems } from '../../api/jellyfin/mappers';
 import { FocusableButton } from '../../components/FocusableButton';
 import { formatMediaDuration, formatMediaTime } from '../../utils/format';
@@ -23,11 +22,8 @@ import {
 
 type PlaybackRuntime = {
   client: ReturnType<ReturnType<typeof useApp>['services']['jellyfin']['getClient']>;
-  serverUrl: string;
   itemId: string;
   userId: string;
-  accessToken: string;
-  deviceId: string;
   settings: ReturnType<typeof useApp>['state']['settings'];
   audioStreamIndex?: number | null;
   subtitleStreamIndex?: number | null;
@@ -444,12 +440,9 @@ export function PlaybackScreen() {
 
   if (intent && userSession && state.serverUrl) {
     runtimeRef.current = {
-      client: services.jellyfin.configureSession(state.serverUrl, userSession.accessToken),
-      serverUrl: state.serverUrl,
+      client: services.jellyfin.getAuthenticatedClient(),
       itemId: intent.itemId,
       userId: intent.userId,
-      accessToken: userSession.accessToken,
-      deviceId: userSession.deviceId,
       settings: state.settings,
       audioStreamIndex: intent.audioStreamIndex,
       subtitleStreamIndex: intent.subtitleStreamIndex
@@ -625,23 +618,14 @@ export function PlaybackScreen() {
             ?? source.MediaStreams?.find(stream => stream.Type === 'Audio');
           const sourceVideoCodec = source.VideoCodec ?? sourceVideoStream?.Codec ?? null;
           const sourceAudioCodec = source.AudioCodec ?? sourceAudioStream?.Codec ?? null;
-          const streamUrl = resolvePlaybackStreamUrl(
-            runtime.serverUrl,
+          const streamUrl = runtime.client.resolvePlaybackStreamUrl(
             request.itemId,
             source,
-            decision.mode,
-            runtime.accessToken,
-            runtime.deviceId
+            decision.mode
           );
 
-          const reportingClient = new JellyfinApiClient({
-            baseUrl: runtime.serverUrl,
-            accessToken: runtime.accessToken,
-            deviceId: runtime.deviceId,
-            requestTracker: services.requestTracker
-          });
           reportingRuntimeByAttemptRef.current.set(context.attemptId, {
-            client: reportingClient,
+            client: runtime.client,
             itemId: runtime.itemId
           });
           while (reportingRuntimeByAttemptRef.current.size > 8) {

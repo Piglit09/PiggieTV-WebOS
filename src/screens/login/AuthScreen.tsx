@@ -52,7 +52,7 @@ export function AuthScreen() {
   const error = controllerState.status === 'error'
     ? controllerState.errorMessage
     : state.startupError;
-  const canRetrySavedSession = Boolean(state.startupError && services.storage.getState().session);
+  const canRetrySavedSession = Boolean(state.startupError && services.storage.hasStoredSession());
   const serverOrigin = useMemo(() => {
     try {
       return state.serverUrl ? new URL(state.serverUrl).origin : 'not configured';
@@ -83,12 +83,19 @@ export function AuthScreen() {
     setServerTest({ status: 'running', durationMs: 0, httpStatus: null });
 
     try {
-      const response = await services.jellyfin.configureServer(state.serverUrl).validateServer(
+      const response = await services.validateServer(
+        state.serverUrl,
         SERVER_TEST_TIMEOUT_MS,
         { onResponseReceived: payload => { status = payload.status; } },
         controller.signal
       );
       if (controller.signal.aborted) return;
+      dispatch({
+        type: 'set_startup',
+        startupInProgress: false,
+        startupMessage: 'Server available',
+        startupError: null
+      });
       setServerTest({
         status: 'success',
         durationMs: Date.now() - startedAt,

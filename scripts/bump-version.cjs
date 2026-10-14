@@ -89,6 +89,7 @@ if (require.main === module) {
       const state = readVersionState();
       console.log(`Version metadata is synchronized at ${state.authoritativeVersion}.`);
     } else {
+      require('./ptv-workspace-preflight.cjs').assertWorkspaceAuthority('edit', { cwd: root });
       console.log(bumpVersion());
     }
   } catch (error) {

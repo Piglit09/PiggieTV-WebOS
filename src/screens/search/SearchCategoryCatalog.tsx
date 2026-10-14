@@ -24,7 +24,7 @@ export function SearchCategoryCatalog({ category }: { category: PtvSearchCategor
   const pendingPageFocus = useRef(true);
   const client = useMemo(() => {
     if (!state.serverUrl || !userSession) return null;
-    return services.jellyfin.configureSession(state.serverUrl, userSession.accessToken);
+    return services.jellyfin.getAuthenticatedClient();
   }, [services.jellyfin, state.serverUrl, userSession]);
 
   useEffect(() => {

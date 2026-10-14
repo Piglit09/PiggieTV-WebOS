@@ -40,16 +40,12 @@ export function ServerScreen() {
     setChecking(true);
     try {
       const normalized = normalizeServerUrl(targetUrl);
-      services.jellyfin.clearAuthorization();
-      const client = services.jellyfin.configureServer(normalized);
-      const identity = await client.validateServer(10_000, {}, controller.signal);
-      if (attemptRef.current !== thisAttempt) return;
-      const savedSession = services.storage.getSession();
-      if (savedSession && savedSession.serverUrl !== normalized) {
-        services.storage.clearSession();
-        services.jellyfin.clearAuthorization();
-        dispatch({ type: 'logout' });
+      const savedSessionServerUrl = services.storage.getStoredSessionServerUrl();
+      if (savedSessionServerUrl && savedSessionServerUrl !== normalized) {
+        await services.logout('server');
       }
+      const identity = await services.validateServer(normalized, 10_000, {}, controller.signal);
+      if (attemptRef.current !== thisAttempt) return;
       const serverSession = {
         serverId: identity.ServerId,
         baseUrl: normalized,
@@ -136,8 +132,9 @@ export function ServerScreen() {
                 <FocusableButton
                   focusId={`recent-remove-${item}`}
                   onClick={() => {
-                    services.storage.removeServerByUrl(item);
-                    dispatch({ type: 'set_recent_servers', recentServers: services.storage.getRecentServers() });
+                    void services.storage.removeServerByUrl(item).then(() => {
+                      dispatch({ type: 'set_recent_servers', recentServers: services.storage.getRecentServers() });
+                    });
                   }}
                 >
                   Remove

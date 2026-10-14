@@ -73,13 +73,16 @@ The fix removes view-mounted state from transaction ownership. The controller re
 
 ## Canonical persisted session
 
-The storage envelope is schema version 2 and contains one canonical `session` value. The persisted auth record is schema version 1 with exactly these fields:
+The ordinary Web Storage envelope is schema version 3 and contains tokenless
+schema-2 session metadata:
 
 ```ts
-interface PersistedSession {
-  schemaVersion: 1;
+interface PersistedSessionMetadata {
+  schemaVersion: 2;
+  credentialSchemaVersion: 1;
+  credentialId: string;
   serverUrl: string;
-  accessToken: string;
+  serverId: string;
   userId: string;
   userName: string;
   deviceId: string;
@@ -89,9 +92,21 @@ interface PersistedSession {
 }
 ```
 
-The server URL is normalized before storage. The stable device ID is also retained under its dedicated device-ID storage key so new requests retain the same Jellyfin device identity. `StorageRepository.saveSession` writes a complete replacement record, then reads it back and verifies the important identity fields. The in-memory storage snapshot is not advanced if the write fails.
+The access token is AES-256-GCM encrypted in IndexedDB and bound to this
+metadata with authenticated additional data. A non-extractable WebCrypto key
+is stored separately in the same app sandbox. `StorageRepository.saveSession`
+stages and verifies the protected credential before replacing plaintext legacy
+state with tokenless metadata. Its synchronous activation boundary commits API,
+credential-epoch, UI, and route ownership before another auth operation can
+interleave.
 
-Older version-1 stores containing `users[]` are migrated by selecting the latest usable user session. Malformed, unsupported, or incomplete sessions are discarded rather than partially restored. Access tokens and passwords are sensitive values and must never appear in diagnostics.
+Older version-2 sessions and version-1 `users[]` stores migrate only after
+protected readback succeeds. Unrecoverable malformed/current/future auth state
+is durably cleared once; a potentially recoverable legacy credential is
+preserved when required migration identity or protected persistence is
+unavailable. Access tokens, passwords, Quick Connect secrets, protected blobs,
+and arbitrary authenticated server error bodies must never appear in
+diagnostics.
 
 The authenticated response may include a server ID, and the controller validates it against the selected server when available. Server identity belongs to the server-session metadata; it is not duplicated in the canonical persisted credential record above.
 
@@ -104,23 +119,34 @@ The authenticated response may include a server ID, and the controller validates
 3. Normalize the URL, clear shared authorization, configure the shared client, and validate the public server endpoint with an abortable 10-second request.
 4. Persist the validated server metadata.
 5. If no matching session exists, route to sign-in.
-6. Configure the shared client with the stored token and validate `Users/Me` with one abortable 8-second request.
-7. Require the returned user ID to match the stored user; commit the restored user session and reset the route stack to Home.
+6. Read the protected credential, configure the shared client, and validate
+   `Users/Me` with one abortable 8-second request.
+7. Require the returned user and server identities to match stored metadata;
+   bind the credential epoch and reset the route stack to Home.
 
-A `401` or `403` proves the stored token is rejected, so startup clears the shared authorization, app user state, and canonical persisted session before routing to sign-in with an expired-session message. A timeout, network failure, or other transient validation failure clears only in-memory/shared authorization and routes to sign-in without destroying the stored session. Capability discovery is cancellable and begins after authentication; it does not block the session commit or Home navigation.
+A `401` or `403` proves the stored token is rejected, so startup arms the
+durable clear marker, clears protected/local auth, and routes to sign-in. Missing
+or corrupt protected credentials and unrecoverable invalid metadata use the
+same no-loop cleanup. A timeout, network failure, or other transient validation
+failure clears only in-memory/shared authorization and preserves the protected
+session. Capability discovery remains cancellable and non-blocking.
 
 ## Sign out and change server
 
-Settings owns the leave-session transaction. It performs these steps in order:
+The app-level auth/session coordinator owns the leave-session transaction.
+Settings and server selection only request it. It performs these steps in
+order:
 
-1. Cancel the active interactive session attempt.
-2. Stop the global playback owner and release playback work.
-3. Clear the canonical persisted session.
-4. Reset the shared Jellyfin client and its access token.
-5. Clear authenticated app state, playback intent, and capabilities.
-6. Reset route history to sign-in for **Sign out**, or server selection for **Change server**.
+1. Supersede the auth generation and abort its requests.
+2. Synchronously arm a non-secret durable clear marker.
+3. Clear in-memory/API/UI ownership and route to sign-in or server selection.
+4. Complete protected credential and key deletion, verifying both are absent.
+5. Attempt bounded `POST /Sessions/Logout` with the captured retiring token;
+   local logout never depends on that network result.
 
-If persistence cannot be cleared, the action shows an error and stops before clearing the in-memory session. This avoids presenting a successful sign-out that would restore the old credential at the next launch.
+If the app exits after step 2, startup completes the pending clear before any
+restore. If deletion fails, the marker remains for retry and the client stays
+locally logged out.
 
 ## State and navigation ownership
 

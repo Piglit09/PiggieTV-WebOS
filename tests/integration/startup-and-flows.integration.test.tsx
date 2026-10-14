@@ -2,6 +2,7 @@ import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../../src/app/App';
+import { AppProvider, useApp } from '../../src/state/appContext';
 import {
   clearHomeCache,
   readHomeCacheSection,
@@ -9,6 +10,10 @@ import {
 } from '../../src/state/homeCache';
 import { clearMediaCache } from '../../src/state/mediaCache';
 import { defaultStorageState, STORAGE_KEY } from '../../src/storage/sessionStore';
+import {
+  InMemoryProtectedCredentialStoreForTests,
+  setCredentialStoreFactoryForTests
+} from '../../src/storage/credentialStore';
 import { DiagnosticsService } from '../../src/core/diagnostics';
 
 type Deferred<T> = {
@@ -43,7 +48,16 @@ const mockReportPlaying = vi.fn();
 const mockReportProgress = vi.fn();
 const mockReportStopped = vi.fn();
 const mockSetAccessToken = vi.fn();
+const mockSetAuthenticatedRequestContextProvider = vi.fn();
+const mockLogout = vi.fn();
 const serverHistory: string[] = [];
+let protectedCredentialStore = new InMemoryProtectedCredentialStoreForTests();
+let capturedAppContext: ReturnType<typeof useApp> | null = null;
+
+function AppServicesHarness() {
+  capturedAppContext = useApp();
+  return <span data-testid="auth-state">{capturedAppContext.state.userSession ? 'authenticated' : 'signed-out'}</span>;
+}
 
 vi.mock('../../src/api/jellyfin/client', () => ({
   JellyfinApiClient: vi.fn((config: { baseUrl: string }) => {
@@ -51,6 +65,7 @@ vi.mock('../../src/api/jellyfin/client', () => ({
     serverHistory.push(baseUrl);
     return {
       setAccessToken: (token?: string) => mockSetAccessToken(token),
+      setAuthenticatedRequestContextProvider: (provider?: unknown) => mockSetAuthenticatedRequestContextProvider(provider),
       setServer: (next: string) => {
         baseUrl = next;
         serverHistory.push(next);
@@ -82,6 +97,8 @@ vi.mock('../../src/api/jellyfin/client', () => ({
       reportPlaying: (...args: unknown[]) => mockReportPlaying(...args),
       reportProgress: (...args: unknown[]) => mockReportProgress(...args),
       reportStopped: (...args: unknown[]) => mockReportStopped(...args),
+      logout: (...args: unknown[]) => mockLogout(...args),
+      resolvePlaybackStreamUrl: () => 'https://server.example.com/Videos/item/stream?api_key=redacted',
       getImageUrl: (itemId: string, imageType: string, tag?: string) =>
         `https://server.example.com/Items/${itemId}/Images/${imageType}?tag=${tag ?? ''}`
     };
@@ -108,6 +125,8 @@ function seedSession(overrides: Record<string, unknown> = {}) {
   const now = Date.now();
   localStorage.setItem(STORAGE_KEY, JSON.stringify({
     ...defaultStorageState(),
+    // Reproduce the 0.1.15 plaintext envelope, not the current tokenless schema.
+    schemaVersion: 2,
     servers: [{
       serverId: 'server-demo',
       baseUrl: 'https://server.example.com',
@@ -144,7 +163,7 @@ async function openDiagnostics() {
 }
 
 async function signOutFromSettings() {
-  fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
   fireEvent.click(await screen.findByRole('button', { name: /End this TV session/ }));
   fireEvent.click(await screen.findByRole('button', { name: 'Sign out of PTV' }));
 }
@@ -152,6 +171,9 @@ async function signOutFromSettings() {
 beforeEach(() => {
   vi.useRealTimers();
   localStorage.clear();
+  capturedAppContext = null;
+  protectedCredentialStore = new InMemoryProtectedCredentialStoreForTests();
+  setCredentialStoreFactoryForTests(() => protectedCredentialStore);
   serverHistory.length = 0;
   for (const mock of [
     mockValidateServer,
@@ -180,7 +202,9 @@ beforeEach(() => {
     mockReportPlaying,
     mockReportProgress,
     mockReportStopped,
-    mockSetAccessToken
+    mockSetAccessToken,
+    mockSetAuthenticatedRequestContextProvider,
+    mockLogout
   ]) mock.mockReset();
 
   mockValidateServer.mockResolvedValue(systemInfo());
@@ -237,6 +261,7 @@ beforeEach(() => {
   mockReportPlaying.mockResolvedValue({});
   mockReportProgress.mockResolvedValue({});
   mockReportStopped.mockResolvedValue({});
+  mockLogout.mockResolvedValue({});
 });
 
 afterEach(() => {
@@ -244,6 +269,7 @@ afterEach(() => {
   document.documentElement.classList.remove('ptv-reduced-motion');
   clearHomeCache();
   clearMediaCache();
+  setCredentialStoreFactoryForTests(null);
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
@@ -526,6 +552,62 @@ describe('integration: startup and canonical session restore', () => {
     expect(screen.queryByText('Guest')).toBeNull();
   });
 
+  it('durably sanitizes structurally invalid local auth instead of looping', async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      ...defaultStorageState(),
+      session: {
+        schemaVersion: 2,
+        accessToken: 'invalid-local-plaintext-token',
+        userId: 'incomplete-user'
+      }
+    }));
+
+    render(<App />);
+    await waitForAuth();
+
+    const raw = localStorage.getItem(STORAGE_KEY) ?? '';
+    expect(raw).not.toContain('invalid-local-plaintext-token');
+    expect(JSON.parse(raw)).toEqual(expect.objectContaining({ session: null }));
+    expect(mockValidateSession).not.toHaveBeenCalled();
+  });
+
+  it('clears a missing protected credential once and starts clean on restart', async () => {
+    const now = Date.now();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      ...defaultStorageState(),
+      servers: [{
+        serverId: 'server-demo',
+        baseUrl: 'https://server.example.com',
+        connectedAt: now
+      }],
+      session: {
+        schemaVersion: 2,
+        credentialSchemaVersion: 1,
+        credentialId: 'missing-credential',
+        serverUrl: 'https://server.example.com',
+        serverId: 'server-demo',
+        userId: 'user-1',
+        userName: 'Missing User',
+        deviceId: 'device-1',
+        deviceName: 'LG webOS TV',
+        applicationVersion: '0.1.16',
+        savedAt: now
+      },
+      lastServerUrl: 'https://server.example.com',
+      recentServers: ['https://server.example.com']
+    }));
+
+    const first = render(<App />);
+    await waitForAuth();
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}').session).toBeNull();
+    first.unmount();
+
+    render(<App />);
+    await waitForAuth();
+    expect(mockValidateSession).not.toHaveBeenCalled();
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}').session).toBeNull();
+  });
+
   it('restores Home only after the stored current-user endpoint validates', async () => {
     seedSession();
     render(<App />);
@@ -655,14 +737,19 @@ describe('integration: password authentication ownership', () => {
     await screen.findByRole('heading', { name: 'PiggieTV' });
     expect(mockAuthenticateByName).toHaveBeenCalledTimes(1);
     expect(mockAuthenticateByName.mock.calls[0]?.[1]).toBe(' secret with spaces ');
-    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as { session: Record<string, unknown> };
+    const rawStored = localStorage.getItem(STORAGE_KEY) ?? '{}';
+    const stored = JSON.parse(rawStored) as { session: Record<string, unknown> };
     expect(stored.session).toEqual(expect.objectContaining({
+      schemaVersion: 2,
       serverUrl: 'https://piggietv.com',
+      serverId: 'server-demo',
       userId: 'user-1',
       userName: 'Local User',
-      accessToken: 'new-token'
+      credentialSchemaVersion: 1
     }));
-    expect(stored.session).not.toHaveProperty('serverId');
+    expect(stored.session).not.toHaveProperty('accessToken');
+    expect(stored.session).not.toHaveProperty('token');
+    expect(rawStored).not.toContain('new-token');
   });
 
   it('still commits a valid response after the StrictMode view cleanup/remount cycle', async () => {
@@ -718,6 +805,58 @@ describe('integration: password authentication ownership', () => {
     await screen.findByRole('heading', { name: 'PiggieTV' });
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as { session?: { userId?: string } };
     expect(stored.session?.userId).toBe('new');
+  });
+});
+
+describe('integration: centralized runtime rejection', () => {
+  it('durably clears the exact current session after a runtime 401', async () => {
+    render(<AppProvider><AppServicesHarness /></AppProvider>);
+    const context = capturedAppContext;
+    if (!context) throw new Error('Expected the app services harness');
+
+    const savedAt = Date.now();
+    const lease = context.services.auth.beginPasswordAuthentication();
+    await context.services.storage.saveSession({
+      schemaVersion: 1,
+      serverUrl: 'https://server.example.com',
+      serverId: 'server-demo',
+      accessToken: 'runtime-rejection-token',
+      userId: 'user-1',
+      userName: 'Runtime User',
+      deviceId: 'device-1',
+      deviceName: 'LG webOS TV',
+      applicationVersion: '0.1.15',
+      savedAt
+    });
+    context.services.jellyfin.configureSession('https://server.example.com', 'runtime-rejection-token');
+    const ticket = context.services.auth.commitAuthenticated(lease);
+    if (!ticket) throw new Error('Expected an authenticated ticket');
+    context.services.activateAuthenticatedRequestContext(ticket);
+    act(() => context.dispatch({
+      type: 'set_user_session',
+      userSession: {
+        userId: 'user-1',
+        userName: 'Runtime User',
+        serverId: 'server-demo',
+        serverUrl: 'https://server.example.com',
+        deviceId: 'device-1',
+        createdAt: savedAt,
+        updatedAt: savedAt
+      }
+    }));
+
+    const requestContext = context.services.auth.captureAuthenticatedRequest();
+    if (!requestContext) throw new Error('Expected a current authenticated request context');
+    await act(async () => {
+      await context.services.auth.handleRuntimeStatus(requestContext, 401);
+    });
+
+    expect(screen.getByTestId('auth-state').textContent).toBe('signed-out');
+    expect(context.services.auth.getSnapshot().state).toBe('UNAUTHENTICATED');
+    expect(context.services.storage.hasStoredSession()).toBe(false);
+    expect(await protectedCredentialStore.hasAnyCredential()).toBe(false);
+    expect(await protectedCredentialStore.hasKey()).toBe(false);
+    expect(localStorage.getItem(STORAGE_KEY)).not.toContain('runtime-rejection-token');
   });
 });
 
@@ -1671,6 +1810,7 @@ describe('integration: Quick Connect, navigation, and sign-out', () => {
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as { session?: unknown };
     expect(stored.session).toBeNull();
     expect(mockSetAccessToken).toHaveBeenLastCalledWith(undefined);
+    expect(mockLogout).toHaveBeenCalledWith('stored-token');
     expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
   });
 

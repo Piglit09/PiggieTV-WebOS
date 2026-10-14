@@ -3,8 +3,13 @@ import { FocusManager } from '../focus/FocusManager';
 import { StorageRepository } from '../storage/repository';
 import { RequestTracker } from '../core/requestTracker';
 import { DiagnosticsService } from '../core/diagnostics';
+import { JellyfinApiClient } from '../api/jellyfin/client';
 import { JellyfinClientContext } from '../api/jellyfin/context';
 import { SessionController } from '../auth/sessionController';
+import {
+  AuthSessionCoordinator,
+  type AuthenticatedSessionTicket
+} from '../auth/authSessionCoordinator';
 import { PTV_APPLICATION_VERSION, PTV_DEVICE_NAME } from '../config/app';
 import { PlaybackLifecycle } from '../playback/lifecycle';
 import type { PtvCapability, PtvError, PtvLibrary, PtvPlaybackIntent, PtvRoute, PtvServerSession, PtvUserSession } from '../types/ptv';
@@ -61,15 +66,24 @@ export type AppAction =
   | { type: 'update_settings'; settings: Partial<AppSettings> }
   | { type: 'logout' };
 
-interface AppServices {
+export interface AppServices {
   storage: StorageRepository;
   jellyfin: JellyfinClientContext;
+  auth: AuthSessionCoordinator;
   session: SessionController;
+  validateServer: (
+    serverUrl: string,
+    timeoutMs?: number,
+    hooks?: Parameters<JellyfinApiClient['validateServer']>[1],
+    signal?: AbortSignal
+  ) => ReturnType<JellyfinApiClient['validateServer']>;
   playback: PlaybackLifecycle;
   focusManager: FocusManager;
   requestTracker: RequestTracker;
   diagnostics: DiagnosticsService;
   startupRestore: StartupRestoreCoordinator;
+  activateAuthenticatedRequestContext: (ticket: AuthenticatedSessionTicket) => void;
+  logout: (target?: 'auth' | 'server') => Promise<void>;
 }
 
 interface AppContextValue {
@@ -234,20 +248,42 @@ function appReducer(state: AppState, action: AppAction): AppState {
 
 export function AppProvider(props: React.PropsWithChildren) {
   const [state, dispatch] = useReducer(appReducer, initialState());
-  const services = useMemo(() => {
+  const services = useMemo<AppServices>(() => {
     const storage = new StorageRepository();
     const focusManager = new FocusManager();
     const requestTracker = new RequestTracker();
     const diagnostics = new DiagnosticsService();
     const startupRestore = new StartupRestoreCoordinator();
+    const auth = new AuthSessionCoordinator();
     const jellyfin = new JellyfinClientContext(storage.getOrCreateDeviceId(), requestTracker);
     const playback = new PlaybackLifecycle();
+
+    const createCandidateClient = (serverUrl: string) => new JellyfinApiClient({
+      baseUrl: serverUrl,
+      deviceId: storage.getOrCreateDeviceId(),
+      requestTracker
+    });
+
+    const installAuthenticatedRequestContext = () => {
+      jellyfin.setAuthenticatedRequestContextProvider(() => {
+        const context = auth.captureAuthenticatedRequest();
+        if (!context) return null;
+        return {
+          ticket: context.ticket,
+          signal: context.signal,
+          isCurrent: context.isCurrent,
+          onUnauthorized: ticket => {
+            if (ticket !== context.ticket) return;
+            void auth.handleRuntimeStatus(context, 401);
+          }
+        };
+      });
+    };
+
     const session = new SessionController({
+      ownership: auth,
       api: {
-        authenticateByName: request => {
-          jellyfin.clearAuthorization();
-          const client = jellyfin.configureServer(request.serverUrl);
-          return client.authenticateByName(
+        authenticateByName: request => createCandidateClient(request.serverUrl).authenticateByName(
             request.username,
             request.password,
             request.timeoutMs,
@@ -257,16 +293,10 @@ export function AppProvider(props: React.PropsWithChildren) {
               onResponseReceived: payload => request.onResponseReceived?.(payload),
               onJsonParsed: payload => request.onJsonParsed?.(payload)
             }
-          );
-        },
-        initiateQuickConnect: request => {
-          jellyfin.clearAuthorization();
-          return jellyfin
-            .configureServer(request.serverUrl)
-            .initiateQuickConnect(request.timeoutMs, request.signal);
-        },
-        getQuickConnectState: request => jellyfin
-          .configureServer(request.serverUrl)
+          ),
+        initiateQuickConnect: request => createCandidateClient(request.serverUrl)
+          .initiateQuickConnect(request.timeoutMs, request.signal),
+        getQuickConnectState: request => createCandidateClient(request.serverUrl)
           .getQuickConnectState(
             request.secret,
             request.timeoutMs,
@@ -276,8 +306,7 @@ export function AppProvider(props: React.PropsWithChildren) {
               onJsonParsed: payload => request.onJsonParsed?.(payload)
             }
           ),
-        authenticateWithQuickConnect: request => jellyfin
-          .configureServer(request.serverUrl)
+        authenticateWithQuickConnect: request => createCandidateClient(request.serverUrl)
           .authenticateWithQuickConnect(
             request.secret,
             request.timeoutMs,
@@ -288,14 +317,24 @@ export function AppProvider(props: React.PropsWithChildren) {
             }
           ),
         setAuthenticationContext: authenticated => {
+          // Fail closed during the tiny persistence-to-epoch handoff. Once the
+          // coordinator commits, the hook below installs the real epoch provider.
+          jellyfin.setAuthenticatedRequestContextProvider(() => null);
           jellyfin.configureSession(authenticated.serverUrl, authenticated.accessToken);
+        },
+        activateAuthenticatedRequestContext: ticket => {
+          const current = auth.captureAuthenticatedRequest();
+          if (!current || current.ticket !== ticket) {
+            throw new Error('Authenticated request ownership could not be activated');
+          }
+          installAuthenticatedRequestContext();
         }
       },
       persistence: {
-        persistSessionAtomically: authenticated => {
-          storage.saveSession({
+        persistSessionAtomically: (authenticated, context, activate) => storage.saveSession({
             schemaVersion: 1,
             serverUrl: authenticated.serverUrl,
+            serverId: authenticated.serverId,
             accessToken: authenticated.accessToken,
             userId: authenticated.userId,
             userName: authenticated.userName,
@@ -303,8 +342,10 @@ export function AppProvider(props: React.PropsWithChildren) {
             deviceName: authenticated.deviceName,
             applicationVersion: authenticated.applicationVersion,
             savedAt: authenticated.savedAt
-          });
-        }
+          }, {
+            signal: context.signal,
+            isCurrent: context.isCurrent
+          }, activate)
       },
       state: {
         commitAuthenticatedSession: authenticated => {
@@ -313,7 +354,6 @@ export function AppProvider(props: React.PropsWithChildren) {
             userSession: {
               userId: authenticated.userId,
               userName: authenticated.userName,
-              accessToken: authenticated.accessToken,
               serverId: authenticated.serverId,
               serverUrl: authenticated.serverUrl,
               deviceId: authenticated.deviceId,
@@ -338,8 +378,103 @@ export function AppProvider(props: React.PropsWithChildren) {
         record: snapshot => diagnostics.recordSessionSnapshot({ ...snapshot })
       }
     });
+
+    const clearVisibleSession = (target: 'auth' | 'server', message: string, error: string | null) => {
+      session.cancelCurrentAttempt();
+      jellyfin.reset();
+      dispatch({ type: 'logout' });
+      dispatch({ type: 'set_capabilities', capabilities: [], ptvCapabilities: [] });
+      dispatch({ type: 'set_libraries', libraries: [] });
+      dispatch({
+        type: 'set_startup',
+        startupInProgress: false,
+        startupMessage: message,
+        startupError: error
+      });
+      dispatch({ type: 'reset_route', route: buildRoute(target) });
+      void playback.stop('superseded').catch(() => {
+        diagnostics.logWarn('Playback cleanup did not complete during local session rejection');
+      });
+    };
+
+    auth.setCurrentSessionRejectionHandler(async () => {
+      try {
+        storage.armSessionClearBarrier();
+      } catch (error) {
+        clearVisibleSession('auth', 'Secure session cleanup failed', 'SECURE_STORAGE_FAILURE');
+        throw error;
+      }
+
+      clearVisibleSession('auth', 'Session expired', 'Your session expired. Sign in again.');
+      await storage.completePendingSessionClear();
+    });
+
+    const logout = async (target: 'auth' | 'server' = 'auth') => {
+      const lease = auth.beginLogout();
+      const retiring = jellyfin.captureRetiringAuthorization();
+
+      try {
+        storage.armSessionClearBarrier();
+      } catch (error) {
+        auth.failStorage(lease);
+        clearVisibleSession(target, 'Secure logout failed', 'SECURE_STORAGE_FAILURE');
+        throw error;
+      }
+
+      clearVisibleSession(target, target === 'server' ? 'Choose a server' : 'Signed out', null);
+
+      if (retiring) {
+        void retiring.client.logout(retiring.accessToken).then(
+          () => diagnostics.recordSessionSnapshot({
+            ...auth.getSnapshot(),
+            serverRevocation: 'success'
+          }),
+          () => diagnostics.recordSessionSnapshot({
+            ...auth.getSnapshot(),
+            serverRevocation: 'failed'
+          })
+        );
+      }
+
+      try {
+        await storage.completePendingSessionClear();
+      } catch (error) {
+        auth.failStorage(lease);
+        dispatch({
+          type: 'set_startup',
+          startupInProgress: false,
+          startupMessage: 'Secure logout failed',
+          startupError: 'SECURE_STORAGE_FAILURE'
+        });
+        throw error;
+      }
+
+      auth.completeLogout(lease);
+    };
+
+    auth.subscribe(snapshot => diagnostics.recordSessionSnapshot({ ...snapshot }));
     diagnostics.attachTracker(requestTracker);
-    return { storage, jellyfin, session, playback, focusManager, requestTracker, diagnostics, startupRestore };
+    return {
+      storage,
+      jellyfin,
+      auth,
+      session,
+      validateServer: (serverUrl, timeoutMs, hooks, signal) => createCandidateClient(serverUrl)
+        .validateServer(timeoutMs, hooks, signal),
+      playback,
+      focusManager,
+      requestTracker,
+      diagnostics,
+      startupRestore,
+      activateAuthenticatedRequestContext: ticket => {
+        const current = auth.captureAuthenticatedRequest();
+        if (!current || current.ticket !== ticket) {
+          throw new Error('Authenticated request ownership is stale');
+        }
+        installAuthenticatedRequestContext();
+      },
+      logout
+    };
   }, [dispatch]);
 
   return <AppContext.Provider value={{ state, dispatch, services }}>{props.children}</AppContext.Provider>;

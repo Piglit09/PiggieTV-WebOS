@@ -215,9 +215,9 @@ export function DiagnosticsScreen() {
       currentSession: {
         envelopeSchemaVersion: stored.schemaVersion,
         sessionSchemaVersion: persistedSession?.schemaVersion ?? null,
-        sessionPresent: Boolean(persistedSession),
+        sessionPresent: services.storage.hasStoredSession(),
         inMemorySessionPresent: Boolean(state.userSession),
-        tokenPresent: Boolean(persistedSession?.accessToken),
+        tokenPresent: services.storage.hasStoredSession(),
         serverUrl: persistedSession?.serverUrl ?? state.serverUrl,
         userId: persistedSession?.userId ?? state.userSession?.userId
       },

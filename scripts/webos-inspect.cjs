@@ -7,6 +7,7 @@ const {
   requireDeviceAlias,
   runWebOsCli
 } = require('./webos-common.cjs');
+const { assertWorkspaceAuthority } = require('./ptv-workspace-preflight.cjs');
 
 function readCliDeviceAlias(args = process.argv.slice(2)) {
   return readCliOption(args, ['--device', '-d'], '--device');
@@ -32,10 +33,11 @@ function formatSafeDeviceList(rawOutput) {
   ].join('\n');
 }
 
-function listDevices(execute = runWebOsCli) {
+function listDevices(execute = runWebOsCli, cliDirectory = null) {
   const output = execute('ares-setup-device', ['--list'], {
     encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe']
+    stdio: ['ignore', 'pipe', 'pipe'],
+    cliDirectory
   });
   console.log(formatSafeDeviceList(output));
 }
@@ -48,15 +50,21 @@ function buildInspectorArgs(args = process.argv.slice(2), env = process.env, roo
 
 function runInspector(options = {}) {
   const execute = options.execute ?? runWebOsCli;
-  const args = buildInspectorArgs(options.args, options.env, options.root);
-  execute('ares-inspect', args, { stdio: 'inherit' });
+  const inputArgs = options.args ?? process.argv.slice(2);
+  const device = requireDeviceAlias(inputArgs, options.env ?? process.env);
+  const authority = assertWorkspaceAuthority('inspect-device', {
+    cwd: options.root ?? process.cwd(), targetId: device
+  });
+  const args = buildInspectorArgs(inputArgs, options.env, options.root);
+  execute('ares-inspect', args, { stdio: 'inherit', cliDirectory: authority.sdkCliDirectory });
 }
 
 function main() {
   const listRequested = process.argv.slice(2).includes('--list');
   try {
     if (listRequested) {
-      listDevices();
+      const authority = assertWorkspaceAuthority('inspect-sdk', { cwd: process.cwd() });
+      listDevices(runWebOsCli, authority.sdkCliDirectory);
       return;
     }
     runInspector();

@@ -13,6 +13,10 @@ import {
   writeBrowseWindow
 } from '../src/state/mediaCache';
 import { defaultStorageState, STORAGE_KEY } from '../src/storage/sessionStore';
+import {
+  InMemoryProtectedCredentialStoreForTests,
+  setCredentialStoreFactoryForTests
+} from '../src/storage/credentialStore';
 
 type Deferred<T> = {
   promise: Promise<T>;
@@ -38,19 +42,24 @@ const mockDiscoverCapabilities = vi.fn();
 const mockGetResume = vi.fn();
 const mockGetNextUp = vi.fn();
 const mockGetRecentlyAdded = vi.fn();
+const mockGetLibraries = vi.fn();
 const mockGetItems = vi.fn();
 const mockGetItem = vi.fn();
 const mockGetSimilarItems = vi.fn();
 const mockGetSeasons = vi.fn();
 const mockGetEpisodes = vi.fn();
 const mockSetAccessToken = vi.fn();
+const mockSetAuthenticatedRequestContextProvider = vi.fn();
 const observerRecords: ObserverRecord[] = [];
+let protectedCredentialStore = new InMemoryProtectedCredentialStoreForTests();
 
 vi.mock('../src/api/jellyfin/client', () => ({
   JellyfinApiClient: vi.fn((config: { baseUrl: string }) => {
     let baseUrl = config.baseUrl;
     return {
       setAccessToken: (token?: string) => mockSetAccessToken(token),
+      setAuthenticatedRequestContextProvider: (provider?: unknown) =>
+        mockSetAuthenticatedRequestContextProvider(provider),
       setServer: (next: string) => { baseUrl = next; },
       getServerUrl: () => baseUrl,
       validateServer: (...args: unknown[]) => mockValidateServer(...args),
@@ -59,6 +68,7 @@ vi.mock('../src/api/jellyfin/client', () => ({
       getResume: (...args: unknown[]) => mockGetResume(...args),
       getNextUp: (...args: unknown[]) => mockGetNextUp(...args),
       getRecentlyAdded: (...args: unknown[]) => mockGetRecentlyAdded(...args),
+      getLibraries: (...args: unknown[]) => mockGetLibraries(...args),
       getItems: (...args: unknown[]) => mockGetItems(...args),
       getItem: (...args: unknown[]) => mockGetItem(...args),
       getSimilarItems: (...args: unknown[]) => mockGetSimilarItems(...args),
@@ -134,6 +144,8 @@ function seedSession() {
   const now = Date.now();
   localStorage.setItem(STORAGE_KEY, JSON.stringify({
     ...defaultStorageState(),
+    // Reproduce the 0.1.15 plaintext envelope, not the current tokenless schema.
+    schemaVersion: 2,
     servers: [{
       serverId: 'server-demo',
       baseUrl: 'https://server.example.com',
@@ -238,6 +250,8 @@ async function openShows() {
 beforeEach(() => {
   observerRecords.length = 0;
   localStorage.clear();
+  protectedCredentialStore = new InMemoryProtectedCredentialStoreForTests();
+  setCredentialStoreFactoryForTests(() => protectedCredentialStore);
   for (const mock of [
     mockValidateServer,
     mockValidateSession,
@@ -245,12 +259,14 @@ beforeEach(() => {
     mockGetResume,
     mockGetNextUp,
     mockGetRecentlyAdded,
+    mockGetLibraries,
     mockGetItems,
     mockGetItem,
     mockGetSimilarItems,
     mockGetSeasons,
     mockGetEpisodes,
-    mockSetAccessToken
+    mockSetAccessToken,
+    mockSetAuthenticatedRequestContextProvider
   ]) mock.mockReset();
 
   mockValidateServer.mockResolvedValue({
@@ -263,6 +279,9 @@ beforeEach(() => {
   mockGetResume.mockResolvedValue({ Items: [] });
   mockGetNextUp.mockResolvedValue({ Items: [] });
   mockGetRecentlyAdded.mockResolvedValue({ Items: [] });
+  mockGetLibraries.mockResolvedValue({
+    Items: [{ Id: 'shows-root', Name: 'Shows', CollectionType: 'tvshows' }]
+  });
   mockGetSimilarItems.mockResolvedValue({ Items: [] });
   mockGetSeasons.mockResolvedValue({ Items: [] });
   mockGetEpisodes.mockResolvedValue({ Items: [] });
@@ -273,6 +292,7 @@ afterEach(() => {
   clearHomeCache();
   clearMediaCache();
   localStorage.clear();
+  setCredentialStoreFactoryForTests(null);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -305,6 +325,47 @@ describe('ShowsLibraryScreen bounded incremental loading', () => {
     await waitFor(() => expect(activeSentinelObserver()?.instance.root).toBe(
       document.querySelector('.ptv-browse__viewport')
     ));
+  });
+
+  it('fans out across typed TV libraries without heavy recursive count fields', async () => {
+    installIntersectionObserver();
+    mockGetLibraries.mockResolvedValueOnce({
+      Items: [
+        { Id: 'shows-a', Name: 'Shows A', CollectionType: 'tvshows' },
+        { Id: 'shows-b', Name: 'Shows B', CollectionType: 'tvshows' },
+        { Id: 'shows-c', Name: 'Shows C', CollectionType: 'tvshows' }
+      ]
+    });
+    mockGetItems.mockImplementation((_userId: string, query: Record<string, unknown>) => {
+      const parentId = String(query.ParentId ?? '');
+      const suffix = parentId.slice(-1).toUpperCase();
+      return Promise.resolve({
+        Items: seriesBatch(1, 2, `Library ${suffix}`, parentId),
+        TotalRecordCount: 2
+      });
+    });
+
+    await openShows();
+    await screen.findByRole('button', { name: 'Library C 2, 2026' });
+
+    expect(mockGetLibraries).toHaveBeenCalledTimes(1);
+    expect(mockGetItems).toHaveBeenCalledTimes(3);
+    expect(mockGetItems.mock.calls.map(call => call[1])).toEqual(expect.arrayContaining([
+      expect.objectContaining({ ParentId: 'shows-a' }),
+      expect.objectContaining({ ParentId: 'shows-b' }),
+      expect.objectContaining({ ParentId: 'shows-c' })
+    ]));
+    for (const call of mockGetItems.mock.calls) {
+      expect(call[1]).toEqual(expect.objectContaining({
+        Fields: 'DateCreated',
+        EnableTotalRecordCount: false,
+        Limit: 24,
+        StartIndex: 0
+      }));
+      expect(String(call[1]?.Fields)).not.toMatch(/ChildCount|RecursiveItemCount|Overview|Genres/);
+    }
+    expect(document.querySelectorAll('.ptv-poster-grid .ptv-card-btn')).toHaveLength(6);
+    expect(screen.getByText('6 titles')).toBeTruthy();
   });
 
   it('appends one guarded batch without moving focus from an existing card', async () => {

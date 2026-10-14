@@ -370,7 +370,7 @@ export function DetailsScreen() {
   const pendingRelatedFocusByRoute = useRef<Map<string, string>>(new Map());
   const client = useMemo(() => {
     if (!state.serverUrl || !userSession) return null;
-    return services.jellyfin.configureSession(state.serverUrl, userSession.accessToken);
+    return services.jellyfin.getAuthenticatedClient();
   }, [state.serverUrl, userSession, services.jellyfin]);
   const detailMedia = useMemo(() => presentDetailMedia(item), [item]);
   const activeEpisode = item?.type === 'Episode' && item.id === itemId ? item : null;

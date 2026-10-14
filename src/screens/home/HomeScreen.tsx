@@ -210,7 +210,7 @@ export function HomeScreen() {
   const renderCountsRef = useRef<Record<HomeSectionId, number>>({ continue: 0, nextup: 0, movies: 0, shows: 0 });
   const client = useMemo(() => {
     if (!state.serverUrl || !userSession) return null;
-    return services.jellyfin.configureSession(state.serverUrl, userSession.accessToken);
+    return services.jellyfin.getAuthenticatedClient();
   }, [state.serverUrl, userSession, services.jellyfin]);
 
   const getArtwork = useCallback((item: PtvItem, variant: CardVariant) => (

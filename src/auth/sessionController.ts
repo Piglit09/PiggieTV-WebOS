@@ -1,5 +1,11 @@
 import { normalizeServerUrl } from '../api/jellyfin/normalizeUrl';
 import type { PtvQuickConnectStateResponse } from '../api/jellyfin/client';
+import {
+  type AuthenticatedRequestContext,
+  type AuthenticatedSessionTicket,
+  type AuthOperationLease,
+  AuthSessionCoordinator
+} from './authSessionCoordinator';
 
 export const AUTH_REQUEST_TIMEOUT_MS = 15_000;
 export const QUICK_CONNECT_TIMEOUT_MS = 120_000;
@@ -137,25 +143,29 @@ export interface SessionApi {
   setAuthenticationContext(
     session: PersistedAuthenticatedSession,
     context: SessionOperationContext
-  ): Awaitable<void>;
+  ): void;
+  activateAuthenticatedRequestContext(
+    ticket: AuthenticatedSessionTicket
+  ): void;
 }
 
 export interface SessionPersistence {
   persistSessionAtomically(
     session: PersistedAuthenticatedSession,
-    context: SessionOperationContext
-  ): Awaitable<void>;
+    context: SessionOperationContext,
+    activate: () => AuthenticatedSessionTicket
+  ): Awaitable<AuthenticatedSessionTicket>;
 }
 
 export interface SessionStateCommitter {
   commitAuthenticatedSession(
     session: PersistedAuthenticatedSession,
     context: SessionOperationContext
-  ): Awaitable<void>;
+  ): void;
 }
 
 export interface SessionNavigation {
-  navigateHome(context: SessionOperationContext): Awaitable<void>;
+  navigateHome(context: SessionOperationContext): void;
 }
 
 export interface SessionDiagnosticSnapshot {
@@ -224,6 +234,7 @@ export interface QuickConnectInput {
 }
 
 export interface SessionControllerDependencies {
+  ownership: AuthSessionCoordinator;
   api: SessionApi;
   persistence: SessionPersistence;
   state: SessionStateCommitter;
@@ -256,7 +267,8 @@ interface InternalAttempt {
   workflow: SessionWorkflow;
   startedAt: number;
   serverOrigin: string;
-  controller: AbortController;
+  lease: AuthOperationLease;
+  authenticatedContext?: AuthenticatedRequestContext;
   duplicateKey: DuplicateKey | null;
   promise?: Promise<SessionControllerResult>;
   timeoutHandle?: ReturnType<typeof setTimeout>;
@@ -517,11 +529,11 @@ export class SessionController {
         password: input.password,
         device,
         timeoutMs: this.authTimeoutMs,
-        signal: attempt.controller.signal,
+        signal: this.attemptSignal(attempt),
         onResponseReceived: observation.onResponseReceived,
         onJsonParsed: observation.onJsonParsed
       });
-      const response = await raceWithAbort(request, attempt.controller.signal);
+      const response = await raceWithAbort(request, this.attemptSignal(attempt));
       this.assertCurrent(attempt);
       observation.ensureResponseReceived();
       observation.ensureJsonParsed();
@@ -561,9 +573,9 @@ export class SessionController {
           serverUrl: normalizedServerUrl,
           device,
           timeoutMs: this.authTimeoutMs,
-          signal: attempt.controller.signal
+          signal: this.attemptSignal(attempt)
         }),
-        attempt.controller.signal
+        this.attemptSignal(attempt)
       );
       this.assertCurrent(attempt);
       this.emit(attempt, 'RESPONSE_RECEIVED', 'quick-connect-pending');
@@ -577,8 +589,8 @@ export class SessionController {
 
       while (this.isCurrent(attempt)) {
         await raceWithAbort(
-          this.sleep(this.quickConnectPollIntervalMs, attempt.controller.signal),
-          attempt.controller.signal
+          this.sleep(this.quickConnectPollIntervalMs, this.attemptSignal(attempt)),
+          this.attemptSignal(attempt)
         );
         this.assertCurrent(attempt);
         this.emit(attempt, 'REQUEST_STARTED', 'quick-connect-pending');
@@ -590,11 +602,11 @@ export class SessionController {
             secret,
             device,
             timeoutMs: this.authTimeoutMs,
-            signal: attempt.controller.signal,
+            signal: this.attemptSignal(attempt),
             onResponseReceived: observation.onResponseReceived,
             onJsonParsed: observation.onJsonParsed
           }),
-          attempt.controller.signal
+          this.attemptSignal(attempt)
         );
         this.assertCurrent(attempt);
         observation.ensureResponseReceived();
@@ -612,6 +624,9 @@ export class SessionController {
       }
 
       this.assertCurrent(attempt);
+      if (!this.dependencies.ownership.markAuthenticating(attempt.lease)) {
+        throw new AttemptAbortedError();
+      }
       this.emit(attempt, 'REQUEST_STARTED', 'pending');
       const observation = this.createResponseObservation(attempt);
       const response = await raceWithAbort(
@@ -621,11 +636,11 @@ export class SessionController {
           secret,
           device,
           timeoutMs: this.authTimeoutMs,
-          signal: attempt.controller.signal,
+          signal: this.attemptSignal(attempt),
           onResponseReceived: observation.onResponseReceived,
           onJsonParsed: observation.onJsonParsed
         }),
-        attempt.controller.signal
+        this.attemptSignal(attempt)
       );
       this.assertCurrent(attempt);
       observation.ensureResponseReceived();
@@ -690,83 +705,85 @@ export class SessionController {
       savedAt: this.now()
     };
     const operationContext = this.operationContext(attempt);
+    let committedResult: SessionControllerResult | null = null;
 
     this.emit(attempt, 'SESSION_PERSIST_STARTED', 'pending');
     try {
-      await raceWithAbort(
-        Promise.resolve(this.dependencies.persistence.persistSessionAtomically(session, operationContext)),
-        attempt.controller.signal
+      const ticket = await raceWithAbort(
+        Promise.resolve(this.dependencies.persistence.persistSessionAtomically(
+          session,
+          operationContext,
+          () => {
+            // This hook is deliberately synchronous. Protected readback and
+            // tokenless metadata activation have completed, and no newer auth
+            // operation can interleave before API/UI ownership is committed.
+            this.assertCurrent(attempt);
+            attempt.persistenceSucceeded = true;
+            this.emit(attempt, 'SESSION_PERSISTED', 'pending');
+
+            try {
+              this.dependencies.api.setAuthenticationContext(session, operationContext);
+            } catch (error) {
+              throw new ControllerFailure(
+                'api-context-failure',
+                sanitizeMessage(error, attempt.sensitiveValues),
+                extractStatus(error)
+              );
+            }
+            attempt.apiContextUpdated = true;
+            this.emit(attempt, 'API_CONTEXT_UPDATED', 'pending');
+
+            const committedTicket = this.dependencies.ownership.commitAuthenticated(attempt.lease);
+            if (!committedTicket) throw new AttemptAbortedError();
+            const authenticatedContext = this.dependencies.ownership.captureAuthenticatedRequest();
+            if (
+              !authenticatedContext ||
+              authenticatedContext.ticket !== committedTicket ||
+              !authenticatedContext.isCurrent()
+            ) {
+              throw new AttemptAbortedError();
+            }
+            attempt.authenticatedContext = authenticatedContext;
+
+            // From this point the exact credential epoch is authoritative.
+            // These adapters are synchronous so presentation cannot lag behind
+            // a superseding event-loop turn.
+            this.dependencies.api.activateAuthenticatedRequestContext(committedTicket);
+            this.dependencies.state.commitAuthenticatedSession(session, this.operationContext(attempt));
+            attempt.authStateCommitted = true;
+            this.emit(attempt, 'AUTH_STATE_COMMITTED', 'pending');
+
+            attempt.navigationRequestCount += 1;
+            attempt.navigationRequested = true;
+            this.emit(attempt, 'NAVIGATION_REQUESTED', 'pending');
+            this.dependencies.navigation.navigateHome(this.operationContext(attempt));
+
+            committedResult = {
+              attemptId: attempt.id,
+              status: 'success',
+              classification: 'success',
+              userName,
+              userIdSuffix: attempt.userIdSuffix
+            };
+            attempt.terminalResult = committedResult;
+            this.emit(attempt, 'COMPLETE', 'success', { userName });
+            return committedTicket;
+          }
+        )),
+        operationContext.signal
       );
+      if (!committedResult || ticket !== attempt.authenticatedContext?.ticket) {
+        throw new ControllerFailure('storage-failure', 'Session activation did not complete');
+      }
     } catch (error) {
+      if (error instanceof AttemptAbortedError || error instanceof ControllerFailure) throw error;
       throw new ControllerFailure(
         'storage-failure',
         sanitizeMessage(error, attempt.sensitiveValues),
         extractStatus(error)
       );
     }
-    this.assertCurrent(attempt);
-    attempt.persistenceSucceeded = true;
-    this.emit(attempt, 'SESSION_PERSISTED', 'pending');
-
-    try {
-      await raceWithAbort(
-        Promise.resolve(this.dependencies.api.setAuthenticationContext(session, operationContext)),
-        attempt.controller.signal
-      );
-    } catch (error) {
-      throw new ControllerFailure(
-        'api-context-failure',
-        sanitizeMessage(error, attempt.sensitiveValues),
-        extractStatus(error)
-      );
-    }
-    this.assertCurrent(attempt);
-    attempt.apiContextUpdated = true;
-    this.emit(attempt, 'API_CONTEXT_UPDATED', 'pending');
-
-    try {
-      await raceWithAbort(
-        Promise.resolve(this.dependencies.state.commitAuthenticatedSession(session, operationContext)),
-        attempt.controller.signal
-      );
-    } catch (error) {
-      throw new ControllerFailure(
-        'state-commit-failure',
-        sanitizeMessage(error, attempt.sensitiveValues),
-        extractStatus(error)
-      );
-    }
-    this.assertCurrent(attempt);
-    attempt.authStateCommitted = true;
-    this.emit(attempt, 'AUTH_STATE_COMMITTED', 'pending');
-
-    attempt.navigationRequestCount += 1;
-    attempt.navigationRequested = attempt.navigationRequestCount > 0;
-    this.emit(attempt, 'NAVIGATION_REQUESTED', 'pending');
-    try {
-      await raceWithAbort(
-        Promise.resolve(this.dependencies.navigation.navigateHome(operationContext)),
-        attempt.controller.signal
-      );
-    } catch (error) {
-      throw new ControllerFailure(
-        'navigation-failure',
-        sanitizeMessage(error, attempt.sensitiveValues),
-        extractStatus(error)
-      );
-    }
-    this.assertCurrent(attempt);
-
-    const result: SessionControllerResult = {
-      attemptId: attempt.id,
-      status: 'success',
-      classification: 'success',
-      userName,
-      userIdSuffix: attempt.userIdSuffix
-    };
-    attempt.terminalResult = result;
-    this.emit(attempt, 'COMPLETE', 'success', { userName });
-    return result;
+    return committedResult;
   }
 
   private createAttempt(
@@ -782,7 +799,9 @@ export class SessionController {
       workflow,
       startedAt: this.now(),
       serverOrigin: serverOrigin(normalizedServer),
-      controller: new AbortController(),
+      lease: workflow === 'password'
+        ? this.dependencies.ownership.beginPasswordAuthentication()
+        : this.dependencies.ownership.beginQuickConnect(),
       duplicateKey,
       persistenceSucceeded: false,
       apiContextUpdated: false,
@@ -807,7 +826,7 @@ export class SessionController {
     attempt.timeoutHandle = setTimeout(() => {
       if (!this.isCurrent(attempt) || attempt.terminalResult) return;
       attempt.cancelReason = 'timeout';
-      attempt.controller.abort();
+      this.dependencies.ownership.failConnectivity(attempt.lease);
     }, timeoutMs);
     return attempt;
   }
@@ -928,7 +947,7 @@ export class SessionController {
   private finishFromError(attempt: InternalAttempt, error: unknown): SessionControllerResult {
     if (attempt.terminalResult) return attempt.terminalResult;
 
-    if (error instanceof AttemptAbortedError || attempt.controller.signal.aborted || !this.isCurrent(attempt)) {
+    if (error instanceof AttemptAbortedError || this.attemptSignal(attempt).aborted || !this.isCurrent(attempt)) {
       if (attempt.cancelReason === 'timeout') {
         return this.finishFailure(attempt, 'timeout', 'Authentication request timed out');
       }
@@ -969,6 +988,7 @@ export class SessionController {
     message: string
   ): SessionControllerResult {
     if (attempt.terminalResult) return attempt.terminalResult;
+    this.releaseOwnershipForFailure(attempt, classification);
     const safeMessage = sanitizeMessage(message, attempt.sensitiveValues);
     const result: SessionControllerResult = {
       attemptId: attempt.id,
@@ -987,6 +1007,7 @@ export class SessionController {
     classification: 'cancelled' | 'stale'
   ): SessionControllerResult {
     if (attempt.terminalResult) return attempt.terminalResult;
+    this.dependencies.ownership.cancel(attempt.lease);
     const result: SessionControllerResult = {
       attemptId: attempt.id,
       status: 'idle',
@@ -1000,7 +1021,6 @@ export class SessionController {
   private cancelAttempt(attempt: InternalAttempt, reason: 'cancelled' | 'superseded') {
     if (attempt.terminalResult) return;
     attempt.cancelReason = reason;
-    attempt.controller.abort();
     this.finishCancelled(attempt, reason === 'superseded' ? 'stale' : 'cancelled');
     this.cleanupAttempt(attempt);
   }
@@ -1044,7 +1064,10 @@ export class SessionController {
   }
 
   private isCurrent(attempt: InternalAttempt) {
-    return this.activeAttempt === attempt && !attempt.terminalResult && !attempt.controller.signal.aborted;
+    if (this.activeAttempt !== attempt || attempt.terminalResult) return false;
+    return attempt.authenticatedContext
+      ? attempt.authenticatedContext.isCurrent()
+      : attempt.lease.isCurrent();
   }
 
   private assertCurrent(attempt: InternalAttempt) {
@@ -1054,9 +1077,37 @@ export class SessionController {
   private operationContext(attempt: InternalAttempt): SessionOperationContext {
     return {
       attemptId: attempt.id,
-      signal: attempt.controller.signal,
+      signal: this.attemptSignal(attempt),
       isCurrent: () => this.isCurrent(attempt)
     };
+  }
+
+  private attemptSignal(attempt: InternalAttempt) {
+    return attempt.authenticatedContext?.signal ?? attempt.lease.signal;
+  }
+
+  private releaseOwnershipForFailure(
+    attempt: InternalAttempt,
+    classification: SessionResultClassification
+  ) {
+    if (!attempt.lease.isCurrent()) return;
+    if (classification === 'invalid-credentials') {
+      this.dependencies.ownership.rejectAuthentication(attempt.lease);
+      return;
+    }
+    if (
+      classification === 'network-error' ||
+      classification === 'server-error' ||
+      classification === 'timeout'
+    ) {
+      this.dependencies.ownership.failConnectivity(attempt.lease);
+      return;
+    }
+    if (classification === 'storage-failure') {
+      this.dependencies.ownership.failStorage(attempt.lease);
+      return;
+    }
+    this.dependencies.ownership.cancel(attempt.lease);
   }
 
   private normalizeForDuplicateCheck(rawUrl: string) {
@@ -1080,7 +1131,7 @@ export class SessionController {
     try {
       device = await raceWithAbort(
         Promise.resolve(this.dependencies.getDeviceIdentity()),
-        attempt.controller.signal
+        this.attemptSignal(attempt)
       );
     } catch {
       throw new ControllerFailure('invalid-input', 'Device identity is unavailable');

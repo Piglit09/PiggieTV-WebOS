@@ -9,6 +9,18 @@ import {
 
 export type RequestMethod = 'GET' | 'POST' | 'PUT' | 'DELETE';
 
+/**
+ * Opaque authorization ownership captured by an API client before transport.
+ * The HTTP layer only coordinates cancellation and raw 401 publication; the
+ * provider remains authoritative for ticket identity and current-epoch rules.
+ */
+export interface AuthenticatedRequestContext {
+  ticket: unknown;
+  signal: AbortSignal;
+  isCurrent: () => boolean;
+  onUnauthorized: (ticket: unknown) => void;
+}
+
 export interface RequestConfig {
   method?: RequestMethod;
   timeoutMs?: number;
@@ -58,6 +70,7 @@ export interface RequestConfig {
   requestTracker?: RequestTracker;
   requestCategory?: string;
   requestRoute?: string;
+  authenticatedRequest?: AuthenticatedRequestContext;
 }
 
 export interface RequestDiagnostics {
@@ -135,8 +148,91 @@ function buildHeaders(
   return merged;
 }
 
-function wait(ms: number) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+function cancelledRequestError() {
+  return toPtvError('Request was cancelled', 'cancelled-request');
+}
+
+function isAuthenticatedRequestCurrent(context?: AuthenticatedRequestContext) {
+  if (!context) return true;
+  try {
+    return context.isCurrent();
+  } catch {
+    return false;
+  }
+}
+
+function requestCancellationSignals(config: RequestConfig) {
+  const signals: AbortSignal[] = [];
+  if (config.signal) signals.push(config.signal);
+  const authenticatedSignal = config.authenticatedRequest?.signal;
+  if (authenticatedSignal && !signals.includes(authenticatedSignal)) signals.push(authenticatedSignal);
+  return signals;
+}
+
+class RequestCancellationForwarder {
+  private readonly bindings: Array<{
+    signal: AbortSignal;
+    listener: EventListener;
+  }>;
+
+  public constructor(signals: AbortSignal[], controller: AbortController) {
+    this.bindings = signals.map(signal => {
+      const binding = {
+        signal,
+        listener: (() => controller.abort()) as EventListener
+      };
+      binding.signal.addEventListener('abort', binding.listener, { once: true });
+      return binding;
+    });
+
+    if (this.bindings.some(binding => binding.signal.aborted)) controller.abort();
+  }
+
+  public detach() {
+    this.bindings.forEach(binding => {
+      binding.signal.removeEventListener('abort', binding.listener);
+    });
+  }
+}
+
+function assertRequestCurrent(config: RequestConfig) {
+  if (
+    requestCancellationSignals(config).some(signal => signal.aborted) ||
+    !isAuthenticatedRequestCurrent(config.authenticatedRequest)
+  ) {
+    throw cancelledRequestError();
+  }
+}
+
+function wait(ms: number, config: RequestConfig) {
+  assertRequestCurrent(config);
+  const signals = requestCancellationSignals(config);
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      signals.forEach(signal => signal.removeEventListener('abort', cancel));
+    };
+    const complete = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (!isAuthenticatedRequestCurrent(config.authenticatedRequest)) {
+        reject(cancelledRequestError());
+        return;
+      }
+      resolve();
+    };
+    const cancel = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutHandle);
+      cleanup();
+      reject(cancelledRequestError());
+    };
+    const timeoutHandle = setTimeout(complete, ms);
+    signals.forEach(signal => signal.addEventListener('abort', cancel, { once: true }));
+    if (signals.some(signal => signal.aborted)) cancel();
+  });
 }
 
 function sanitizeTrackerUrl(rawUrl: string) {
@@ -223,6 +319,24 @@ function extractErrorMessage(payload: string): string | null {
   return cleaned.length > 0 ? cleaned : null;
 }
 
+function responseErrorMessage(
+  payload: string,
+  status: number,
+  requestCategory: string | undefined,
+  carriesCredential: boolean
+): string {
+  if (requestCategory === 'authentication' || carriesCredential) {
+    return status === 400 || status === 401 || status === 403
+      ? requestCategory === 'authentication'
+        ? 'Authentication request was rejected'
+        : `Authenticated request was rejected (${status})`
+      : requestCategory === 'authentication'
+        ? `Authentication request failed (${status})`
+        : `Authenticated request failed (${status})`;
+  }
+  return extractErrorMessage(payload) ?? `Request failed (${status})`;
+}
+
 function mapTransportError(error: unknown): PtvError {
   if (error instanceof DOMException) {
     if (error.name === 'AbortError') {
@@ -270,31 +384,27 @@ export async function requestJson<T>(
   const tracker = config.requestTracker;
   const requestCategory = config.requestCategory;
   const requestRoute = config.requestRoute;
+  const carriesCredential = typeof authorization === 'string'
+    ? authorization.trim().length > 0
+    : Boolean(authorization?.accessToken?.trim());
 
   let attempt = 0;
   let lastError: PtvError = { kind: 'unknown', message: 'Request failed', recoverable: false };
 
   while (attempt <= maxRetries) {
+    assertRequestCurrent(config);
     const startedAt = Date.now();
     const controller = new AbortController();
     let timeoutTriggered = false;
     let requestFinalized = false;
     const timeoutId = window.setTimeout(() => {
+      if (controller.signal.aborted) return;
       timeoutTriggered = true;
       controller.abort();
     }, timeoutMs);
 
-    const onParentAbort = () => {
-      controller.abort();
-    };
-
-    if (config.signal) {
-      if (config.signal.aborted) {
-        clearTimeout(timeoutId);
-        throw toPtvError('Request cancelled', 'cancelled-request');
-      }
-      config.signal.addEventListener('abort', onParentAbort, { once: true });
-    }
+    const cancellationSignals = requestCancellationSignals(config);
+    const cancellationForwarder = new RequestCancellationForwarder(cancellationSignals, controller);
 
     const requestId = tracker?.start(safeUrl, method, requestCategory, requestRoute) ?? null;
     let parseResult: 'json' | 'empty' | 'html' | 'invalid-json' | 'network' | undefined;
@@ -313,6 +423,18 @@ export async function requestJson<T>(
 
       const durationMs = Math.max(1, Date.now() - startedAt);
       contentType = response.headers.get('content-type') ?? 'unknown';
+      assertRequestCurrent(config);
+      if (
+        response.status === 401 &&
+        config.authenticatedRequest &&
+        isAuthenticatedRequestCurrent(config.authenticatedRequest)
+      ) {
+        try {
+          config.authenticatedRequest.onUnauthorized(config.authenticatedRequest.ticket);
+        } catch {
+          // Rejection publication cannot replace the transport's HTTP result.
+        }
+      }
       if (config.onResponseReceived) {
         config.onResponseReceived({
           url: safeUrl,
@@ -321,10 +443,16 @@ export async function requestJson<T>(
           contentType
         });
       }
+      if (response.status !== 401) assertRequestCurrent(config);
       if (!response.ok) {
         const payload = await response.text().catch(() => '');
         parseResult = classifyResponsePayload(payload, contentType);
-        const errorMessage = extractErrorMessage(payload) ?? `Request failed (${response.status})`;
+        const errorMessage = responseErrorMessage(
+          payload,
+          response.status,
+          requestCategory,
+          carriesCredential
+        );
         lastError = toPtvError(
           { message: errorMessage, code: response.status },
           mapStatusToErrorKind(response.status)
@@ -337,6 +465,7 @@ export async function requestJson<T>(
       }
 
       const rawBody = await response.text();
+      assertRequestCurrent(config);
       if (config.onBodyRead) {
         const bodyResult = classifyResponsePayload(rawBody, contentType);
         parseResult = bodyResult === 'json' ? bodyResult : parseResult ?? bodyResult;
@@ -416,8 +545,18 @@ export async function requestJson<T>(
 
       return data;
     } catch (error) {
-      const requestTimedOut = isTimeoutAbort(error, timeoutTriggered);
-      const requestCancelled = isCallerAbort(error, timeoutTriggered);
+      // Legacy webOS Chromium can surface an aborted fetch as TypeError while
+      // newer engines use DOMException/AbortError. The controller state is the
+      // reliable cross-engine source for distinguishing our timeout from a
+      // caller/credential-epoch cancellation.
+      const legacyFetchAbort = controller.signal.aborted && error instanceof TypeError;
+      const requestTimedOut = isTimeoutAbort(error, timeoutTriggered) || (timeoutTriggered && legacyFetchAbort);
+      const requestCancelled = !requestTimedOut && (legacyFetchAbort || isCallerAbort(error, timeoutTriggered) || (
+        error !== null &&
+        typeof error === 'object' &&
+        'kind' in error &&
+        (error as { kind?: unknown }).kind === 'cancelled-request'
+      ));
       if (requestTimedOut) {
         lastError = toPtvError('The server took too long to respond', 'request-timeout');
       } else if (requestCancelled) {
@@ -459,12 +598,10 @@ export async function requestJson<T>(
       }
 
       attempt += 1;
-      await wait(retryDelayMs * attempt);
+      await wait(retryDelayMs * attempt, config);
     } finally {
       clearTimeout(timeoutId);
-      if (config.signal) {
-        config.signal.removeEventListener('abort', onParentAbort);
-      }
+      cancellationForwarder.detach();
     }
   }
 

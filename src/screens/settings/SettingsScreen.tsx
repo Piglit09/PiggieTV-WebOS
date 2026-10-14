@@ -33,18 +33,11 @@ export function SettingsScreen() {
   const appVersion = import.meta.env.VITE_PTV_VERSION ?? PTV_APPLICATION_VERSION;
 
   const leaveSession = async (target: 'auth' | 'server') => {
-    services.session.cancelCurrentAttempt();
-    await services.playback.stop();
     try {
-      services.storage.clearSession();
+      await services.logout(target);
     } catch (cause) {
       setError(redactSensitiveText(cause instanceof Error ? cause.message : 'Could not clear the saved session'));
-      return;
     }
-    services.jellyfin.reset();
-    dispatch({ type: 'logout' });
-    dispatch({ type: 'set_capabilities', capabilities: [], ptvCapabilities: [] });
-    dispatch({ type: 'reset_route', route: buildRoute(target) });
   };
 
   return (
